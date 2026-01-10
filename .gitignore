@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+logs/
+assets/champions/
+calibration.json
+
+# Test files
+test_voice.py
+
+# OS
+.DS_Store
+Thumbs.db
