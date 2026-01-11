@@ -25,7 +25,7 @@ class MinimapCalibration:
     y: int = 0
     width: int = 0
     height: int = 0
-    side: str = "right"  # "left" or "right"
+    side: str = "left"  # "left" or "right"
 
     @property
     def region(self) -> Tuple[int, int, int, int]:
@@ -37,13 +37,44 @@ class MinimapCalibration:
         """Check if calibration data is valid."""
         return self.width > 0 and self.height > 0
 
+    @staticmethod
+    def from_resolution(screen_width: int, screen_height: int, side: str = "left", minimap_scale: int = 100) -> 'MinimapCalibration':
+        """Create calibration based on screen resolution, minimap side, and scale setting."""
+        # Base minimap sizes for different resolutions at 100% scale
+        # 1080p: ~264px, 1440p: ~352px, 4K: ~528px
+        if screen_height >= 2160:  # 4K
+            base_size = 528
+        elif screen_height >= 1440:  # 1440p
+            base_size = 352
+        else:  # 1080p and below
+            base_size = 264
+
+        # Apply the in-game minimap scale (0-100)
+        # Scale 0 = 50% of base, Scale 100 = 100% of base
+        scale_factor = 0.5 + (minimap_scale / 100) * 0.5
+        size = int(base_size * scale_factor)
+
+        if side == "left":
+            x = 0
+        else:
+            x = screen_width - size
+
+        y = screen_height - size
+
+        return MinimapCalibration(x=x, y=y, width=size, height=size, side=side)
+
 
 @dataclass
 class TrackerSettings:
     """Main tracker configuration settings."""
+    # Debug settings
+    debug_mode: bool = False  # Enable debug output
+    debug_save_interval: float = 5.0  # Save debug images every N seconds
+    debug_dir: str = "debug"  # Debug output directory
+
     # Detection settings
     scan_rate_hz: int = 15  # Scans per second
-    template_threshold: float = 0.7  # Match confidence threshold
+    template_threshold: float = 0.55  # Match confidence threshold
 
     # Alert settings
     alert_cooldown_seconds: float = 10.0
@@ -58,7 +89,7 @@ class TrackerSettings:
     ])
 
     # Voice settings
-    voice_enabled: bool = True
+    voice_enabled: bool = False  # Disabled - using overlay only
     voice_rate: int = 175  # Words per minute
 
     # Overlay settings

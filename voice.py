@@ -3,8 +3,7 @@ Text-to-speech alert system with cooldowns.
 Uses pyttsx3 for offline voice synthesis.
 """
 import time
-import threading
-import queue
+from datetime import datetime
 from typing import Optional
 
 import pyttsx3
@@ -13,55 +12,65 @@ from config import config
 from zones import Zone, ThreatLevel
 
 
+def debug_log(message: str):
+    """Print debug message with timestamp."""
+    if config.settings.debug_mode:
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"[DEBUG VOICE {timestamp}] {message}")
+
+
 class VoiceAlertSystem:
     """Handles voice alerts with cooldown management."""
 
     def __init__(self):
         self._engine: Optional[pyttsx3.Engine] = None
         self._last_alert_time: float = 0
-        self._alert_queue: queue.Queue = queue.Queue()
-        self._voice_thread: Optional[threading.Thread] = None
-        self._running: bool = False
         self._initialized: bool = False
 
     def initialize(self) -> bool:
         """Initialize the TTS engine."""
         try:
+            debug_log("Initializing TTS engine...")
             self._engine = pyttsx3.init()
             self._engine.setProperty('rate', config.settings.voice_rate)
 
             # Get available voices and use the first one
             voices = self._engine.getProperty('voices')
+            debug_log(f"Available voices: {len(voices) if voices else 0}")
             if voices:
                 self._engine.setProperty('voice', voices[0].id)
+                debug_log(f"Using voice: {voices[0].name}")
 
             self._initialized = True
-            self._running = True
-
-            # Start voice processing thread
-            self._voice_thread = threading.Thread(target=self._process_alerts, daemon=True)
-            self._voice_thread.start()
-
+            debug_log("Voice system initialized successfully")
             print("[STATUS] Voice system initialized")
             return True
         except Exception as e:
             print(f"[ERROR] Failed to initialize voice system: {e}")
+            debug_log(f"Init error: {e}")
             self._initialized = False
             return False
 
-    def _process_alerts(self):
-        """Background thread that processes voice alerts."""
-        while self._running:
+    def _speak(self, message: str):
+        """Speak a message directly (blocking)."""
+        if not self._initialized or not self._engine:
+            debug_log("Engine not initialized, skipping speech")
+            return
+
+        try:
+            debug_log(f"Speaking: {message}")
+            self._engine.say(message)
+            self._engine.runAndWait()
+            debug_log("Speech completed")
+        except Exception as e:
+            debug_log(f"Speech error: {e}")
+            # Try to reinitialize engine
             try:
-                # Wait for an alert with timeout
-                message = self._alert_queue.get(timeout=0.5)
-                if message and self._engine:
-                    self._engine.say(message)
-                    self._engine.runAndWait()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"[ERROR] Voice alert failed: {e}")
+                self._engine = pyttsx3.init()
+                self._engine.setProperty('rate', config.settings.voice_rate)
+                debug_log("Engine reinitialized after error")
+            except:
+                pass
 
     def _can_alert(self) -> bool:
         """Check if we're allowed to send an alert (cooldown check)."""
@@ -84,6 +93,9 @@ class VoiceAlertSystem:
             True if alert was triggered, False if suppressed by cooldown
         """
         if not self._can_alert():
+            remaining = self.get_cooldown_remaining()
+            debug_log(f"Alert BLOCKED by cooldown ({remaining:.1f}s remaining)")
+            print(f"[VOICE] Alert blocked - cooldown {remaining:.1f}s remaining")
             return False
 
         # Build the alert message
@@ -95,7 +107,7 @@ class VoiceAlertSystem:
 
         message = f"{threat_prefix}Enemy jungler disappeared from {zone.display_name}"
 
-        return self._queue_alert(message)
+        return self._trigger_alert(message)
 
     def alert_spotted(self, zone: Zone, champion: str) -> bool:
         """
@@ -109,6 +121,9 @@ class VoiceAlertSystem:
             True if alert was triggered, False if suppressed by cooldown
         """
         if not self._can_alert():
+            remaining = self.get_cooldown_remaining()
+            debug_log(f"Spotted alert BLOCKED by cooldown ({remaining:.1f}s remaining)")
+            print(f"[VOICE] Spotted alert blocked - cooldown {remaining:.1f}s remaining")
             return False
 
         threat_prefix = ""
@@ -117,7 +132,7 @@ class VoiceAlertSystem:
 
         message = f"{threat_prefix}Enemy jungler spotted at {zone.display_name}"
 
-        return self._queue_alert(message)
+        return self._trigger_alert(message)
 
     def alert_predicted(self, zone: Zone, confidence: float, champion: str) -> bool:
         """
@@ -152,21 +167,22 @@ class VoiceAlertSystem:
 
         message = f"{threat_prefix}Enemy jungler {qualifier} {zone.display_name}"
 
-        return self._queue_alert(message)
+        return self._trigger_alert(message)
 
-    def _queue_alert(self, message: str) -> bool:
-        """Queue an alert message for speaking."""
-        if not self._initialized:
-            print(f"[ALERT] {message}")  # Fallback to console
-            return True
+    def _trigger_alert(self, message: str) -> bool:
+        """Trigger an alert - speak it directly."""
+        debug_log(f"Triggering alert: {message}")
 
-        try:
-            self._alert_queue.put_nowait(message)
-            self._last_alert_time = time.time()
-            print(f"[ALERT] {message}")
-            return True
-        except queue.Full:
-            return False
+        print(f"[ALERT] {message}")
+        print(f"[VOICE] Speaking now...")
+        self._last_alert_time = time.time()
+
+        # Speak directly (blocking but short)
+        self._speak(message)
+
+        print(f"[VOICE] Speech completed, cooldown started ({config.settings.alert_cooldown_seconds}s)")
+
+        return True
 
     def get_cooldown_remaining(self) -> float:
         """Get seconds remaining on cooldown."""
@@ -180,14 +196,12 @@ class VoiceAlertSystem:
 
     def shutdown(self):
         """Shutdown the voice system."""
-        self._running = False
-        if self._voice_thread and self._voice_thread.is_alive():
-            self._voice_thread.join(timeout=2)
         if self._engine:
             try:
                 self._engine.stop()
             except Exception:
                 pass
+        self._initialized = False
         print("[STATUS] Voice system shutdown")
 
     def reset_cooldown(self):

@@ -1,429 +1,409 @@
 """
-League of Legends Jungler Tracker - Main Entry Point
+League of Legends Jungler Tracker - Simple Edition
 
-A tool that tracks the enemy jungler on the minimap and provides voice alerts.
-Designed for mid lane players to improve map awareness.
-
-Usage:
-    python main.py
+Shows if enemy jungler is visible on minimap.
 """
 import sys
 import time
-import threading
 import ctypes
+import mss
+import numpy as np
+import cv2
 from typing import Optional
 
-# Windows-specific imports for game detection
-try:
-    import win32gui
-    import win32process
-    import psutil
-    HAS_WIN32 = True
-except ImportError:
-    HAS_WIN32 = False
-    print("[WARNING] pywin32 not installed. Game detection will be limited.")
-
-from config import config
-from capture import screen_capture
-from detector import champion_detector, detect_enemy_jungler, is_game_active
-from predictor import jungle_predictor
-from voice import voice_system
-from logger import detection_logger
+from config import config, MinimapCalibration
+from detector import detect_enemy_jungler, is_game_active, grid_detector
 from overlay import tracker_overlay
-from zones import ThreatLevel
 
 
-class JunglerTracker:
-    """Main tracker application."""
+class SimpleJunglerTracker:
+    """Simple tracker - just shows if jungler is visible."""
 
-    def __init__(self):
+    def __init__(self, test_mode: bool = False):
         self._running = False
-        self._tracking = False
-        self._game_active = False
         self._enemy_jungler = ""
-        self._scan_thread: Optional[threading.Thread] = None
-        self._last_scan_time = 0
+        self._sct = mss.mss()
+        self._minimap_config: Optional[MinimapCalibration] = None
+        self._test_mode = test_mode
 
     def start(self):
-        """Start the tracker application."""
-        print("=" * 60)
-        print("  LEAGUE OF LEGENDS JUNGLER TRACKER")
-        print("  For Mid Lane Players")
-        print("=" * 60)
+        """Start the tracker."""
+        print("=" * 50)
+        if self._test_mode:
+            print("  JUNGLER TRACKER - TEST MODE")
+        else:
+            print("  JUNGLER TRACKER - Simple Mode")
+        print("=" * 50)
         print()
+
+        # Get screen resolution
+        monitor = self._sct.monitors[1]
+        screen_w, screen_h = monitor['width'], monitor['height']
+        print(f"[INFO] Screen resolution: {screen_w}x{screen_h}")
+
+        # Ask user for minimap side
+        print("\nWhere is your minimap?")
+        print("1. Left side")
+        print("2. Right side (default)")
+        try:
+            choice = input("[INPUT] Enter 1 or 2 (or left/right): ").strip().lower()
+            if choice in ["1", "left", "l"]:
+                side = "left"
+            else:
+                side = "right"  # Default to right (most common)
+        except:
+            side = "right"
+
+        # Ask for minimap scale
+        print("\nWhat is your minimap scale in League settings? (default 100)")
+        try:
+            scale_input = input("[INPUT] Enter scale (0-100): ").strip()
+            if scale_input:
+                minimap_scale = int(scale_input)
+            else:
+                minimap_scale = 100
+        except:
+            minimap_scale = 100
+
+        # Calculate minimap position with scale
+        self._minimap_config = MinimapCalibration.from_resolution(screen_w, screen_h, side, minimap_scale)
+        print(f"[INFO] Minimap: x={self._minimap_config.x}, y={self._minimap_config.y}, "
+              f"size={self._minimap_config.width}x{self._minimap_config.height}")
 
         self._running = True
 
-        # Initialize systems
-        print("[STATUS] Initializing systems...")
-
-        # Initialize voice
-        if config.settings.voice_enabled:
-            voice_system.initialize()
-
         # Start overlay
-        if config.settings.overlay_enabled:
-            tracker_overlay.start()
-            tracker_overlay.update_status("Waiting for game...")
+        tracker_overlay.start()
+        tracker_overlay.update_status("Waiting for game...")
 
-        # Main loop - wait for game and track
         try:
             self._main_loop()
         except KeyboardInterrupt:
-            print("\n[STATUS] Interrupted by user")
+            print("\n[STATUS] Stopped by user")
         finally:
             self.stop()
 
     def _main_loop(self):
-        """Main application loop."""
+        """Main loop."""
         while self._running:
-            if not self._game_active:
-                # Wait for game to start
-                self._wait_for_game()
+            if self._test_mode:
+                # TEST MODE: Skip API, ask for champion directly
+                self._enemy_jungler = self._manual_jungler_input()
+                if not self._enemy_jungler:
+                    print("[ERROR] No champion entered")
+                    continue
 
-            if self._game_active and self._running:
-                # Game found - start tracking
-                self._setup_tracking()
+                print(f"[TEST] Will track: {self._enemy_jungler}")
+                tracker_overlay.update_jungler(self._enemy_jungler)
 
-                if self._tracking:
-                    self._tracking_loop()
+                # Set up the grid detector
+                if not grid_detector.set_champion(self._enemy_jungler):
+                    print(f"[ERROR] Failed to load icon for {self._enemy_jungler}")
+                    tracker_overlay.update_status("Failed to load champion icon")
+                    time.sleep(2)
+                    continue
 
-                # Game ended - cleanup
-                self._end_tracking()
-
-    def _wait_for_game(self):
-        """Wait for League of Legends game to start."""
-        print("[STATUS] Waiting for League of Legends game...")
-        tracker_overlay.update_status("Waiting for game...")
-
-        while self._running and not self._game_active:
-            if self._detect_game():
-                self._game_active = True
-                print("[STATUS] Game detected!")
-                break
-            time.sleep(2)
-
-    def _detect_game(self) -> bool:
-        """Detect if a League of Legends game is running."""
-        # First try Riot Live Client API - most reliable method
-        if is_game_active():
-            return True
-
-        if not HAS_WIN32:
-            # Fallback: try screen capture and look for minimap
-            screen = screen_capture.capture_screen()
-            if screen is not None:
-                calibration = screen_capture.detect_minimap(screen)
-                return calibration is not None
-            return False
-
-        # Check for game window
-        try:
-            def callback(hwnd, windows):
-                title = win32gui.GetWindowText(hwnd)
-                if "League of Legends" in title and "Client" in title:
-                    windows.append(hwnd)
-                return True
-
-            windows = []
-            win32gui.EnumWindows(callback, windows)
-
-            if windows:
-                # Verify it's actually in-game (not client/lobby)
-                for hwnd in windows:
-                    if win32gui.IsWindowVisible(hwnd):
-                        rect = win32gui.GetWindowRect(hwnd)
-                        width = rect[2] - rect[0]
-                        height = rect[3] - rect[1]
-                        # In-game window is typically fullscreen or large
-                        if width > 800 and height > 600:
-                            return True
-            return False
-        except Exception:
-            return False
-
-    def _setup_tracking(self):
-        """Set up tracking for a new game."""
-        print("\n[STATUS] Setting up tracking...")
-        tracker_overlay.update_status("Calibrating...")
-
-        # Calibrate minimap
-        time.sleep(2)  # Wait for game to fully load
-        if not screen_capture.calibrate():
-            print("[ERROR] Failed to calibrate minimap. Retrying...")
-            time.sleep(5)
-            if not screen_capture.calibrate():
-                print("[ERROR] Calibration failed. Please ensure the game is visible.")
-                self._game_active = False
-                return
-
-        # Get enemy jungler from user
-        self._enemy_jungler = self._get_enemy_jungler()
-        if not self._enemy_jungler:
-            print("[STATUS] No jungler specified. Exiting tracking.")
-            self._game_active = False
-            return
-
-        # Load champion template
-        if not champion_detector.set_champion(self._enemy_jungler):
-            print(f"[WARNING] Could not load icon for {self._enemy_jungler}. "
-                  "Detection may be limited.")
-
-        # Start logging
-        detection_logger.start_game_session(self._enemy_jungler)
-
-        # Update overlay
-        tracker_overlay.update_jungler(self._enemy_jungler)
-        tracker_overlay.update_status("Tracking active")
-
-        print(f"\n[STATUS] Now tracking: {self._enemy_jungler}")
-        print("[STATUS] Press Ctrl+C to stop\n")
-
-        self._tracking = True
-        config.state.is_running = True
-        config.state.enemy_jungler = self._enemy_jungler
-
-    def _get_enemy_jungler(self) -> str:
-        """
-        Get enemy jungler champion name.
-        Tries auto-detection via Riot API first, falls back to manual input.
-        """
-        print("\n[STATUS] Attempting to auto-detect enemy jungler...")
-        tracker_overlay.update_status("Detecting jungler...")
-
-        # Try auto-detection via Riot Live Client API
-        jungler = detect_enemy_jungler()
-
-        if jungler:
-            print(f"[SUCCESS] Auto-detected enemy jungler: {jungler}")
-            # Confirm with user
-            print(f"\nDetected jungler: {jungler}")
-            try:
-                confirm = input("[INPUT] Press Enter to confirm, or type a different champion: ").strip()
-                if confirm:
-                    return confirm
-                return jungler
-            except (EOFError, KeyboardInterrupt):
-                return jungler
-        else:
-            # Fallback to manual input
-            print("[INFO] Auto-detection failed (API unavailable or no Smite found)")
-            print("\n" + "=" * 40)
-            print("Enter the enemy jungler's champion name")
-            print("(e.g., Lee Sin, Elise, Viego, etc.)")
-            print("=" * 40)
-
-            try:
-                jungler = input("[INPUT] Enemy jungler: ").strip()
-                return jungler
-            except (EOFError, KeyboardInterrupt):
-                return ""
-
-    def _tracking_loop(self):
-        """Main tracking loop - scans minimap and triggers alerts."""
-        scan_interval = 1.0 / config.settings.scan_rate_hz
-        last_visible = False
-        last_zone_name = ""
-
-        while self._running and self._tracking and self._game_active:
-            loop_start = time.time()
-
-            # Check if game is still running
-            if not self._detect_game():
-                print("[STATUS] Game ended or minimized.")
-                break
-
-            # Validate/recalibrate if needed
-            if screen_capture.should_recalibrate():
-                if not screen_capture.validate_calibration():
-                    print("[STATUS] Recalibrating minimap...")
-                    screen_capture.calibrate()
-
-            # Capture minimap
-            minimap = screen_capture.capture_minimap()
-            if minimap is None:
-                time.sleep(scan_interval)
+                # Run tracking loop (in test mode, don't check game API)
+                self._tracking_loop_test()
                 continue
 
-            # Detect jungler
-            detection = champion_detector.detect(minimap)
-            current_time = time.time()
+            # NORMAL MODE: Wait for game
+            if not is_game_active():
+                tracker_overlay.update_status("Waiting for game...")
+                tracker_overlay.update_jungler("")
+                tracker_overlay.set_visible(False)
+                time.sleep(2)
+                continue
 
-            if detection:
-                zone = detection.zone
-                zone_name = zone.name if zone else "unknown"
-                zone_display = zone.display_name if zone else "unknown area"
-                is_visible = detection.is_visible
+            # Game detected
+            print("[STATUS] Game detected!")
+            tracker_overlay.update_status("Detecting jungler...")
 
-                # Update predictor with confirmed sightings
-                if is_visible and zone:
-                    jungle_predictor.update_position(zone_name, current_time)
-                    config.state.last_seen_position = detection.position
-                    config.state.last_seen_time = current_time
-                    config.state.last_seen_zone = zone_name
-                    config.state.is_jungler_visible = True
-                    config.state.prediction_active = False
+            # Get enemy jungler from API
+            self._enemy_jungler = self._wait_for_jungler()
+            if not self._enemy_jungler:
+                print("[WARNING] Could not detect jungler")
+                tracker_overlay.update_status("Could not detect jungler")
+                time.sleep(5)
+                continue
 
-                    # Update overlay
-                    tracker_overlay.update_position(
-                        zone_display, 0, "high", zone.threat_level, False
-                    )
+            print(f"[STATUS] Tracking: {self._enemy_jungler}")
+            tracker_overlay.update_jungler(self._enemy_jungler)
 
-                # Check for visibility state change
-                if champion_detector.just_disappeared() and zone:
-                    # Jungler just went invisible - alert!
-                    alert_triggered = voice_system.alert_disappeared(zone, self._enemy_jungler)
+            # Set up the grid detector with the champion icon
+            if not grid_detector.set_champion(self._enemy_jungler):
+                print(f"[ERROR] Failed to load icon for {self._enemy_jungler}")
+                tracker_overlay.update_status("Failed to load champion icon")
+                time.sleep(5)
+                continue
 
-                    detection_logger.log_detection(
-                        champion=self._enemy_jungler,
-                        zone_name=zone_name,
-                        zone_display=zone_display,
-                        position=detection.position,
-                        confidence="high",
-                        is_visible=False,
-                        alert_triggered=alert_triggered,
-                        alert_suppressed_reason="cooldown" if not alert_triggered else ""
-                    )
+            # Main tracking loop
+            self._tracking_loop()
 
-                    config.state.is_jungler_visible = False
+    def _wait_for_jungler(self) -> str:
+        """Wait for API to return jungler info and confirm with user."""
+        for _ in range(15):  # Try for 30 seconds
+            if not is_game_active():
+                return ""
+            jungler = detect_enemy_jungler()
+            if jungler:
+                # Ask user to confirm the detected jungler
+                return self._confirm_jungler(jungler)
+            time.sleep(2)
 
-                elif champion_detector.just_appeared() and zone:
-                    # Jungler appeared - only alert for dangerous zones
-                    alert_triggered = False
-                    if zone.threat_level.value >= ThreatLevel.HIGH.value:
-                        alert_triggered = voice_system.alert_spotted(zone, self._enemy_jungler)
+        # If API couldn't detect, ask user to input manually
+        return self._manual_jungler_input()
 
-                    detection_logger.log_detection(
-                        champion=self._enemy_jungler,
-                        zone_name=zone_name,
-                        zone_display=zone_display,
-                        position=detection.position,
-                        confidence="high",
-                        is_visible=True,
-                        alert_triggered=alert_triggered
-                    )
+    def _confirm_jungler(self, detected_jungler: str) -> str:
+        """Ask user to confirm the detected jungler."""
+        print(f"\n[DETECTED] Enemy jungler appears to be: {detected_jungler}")
+        print("Is this correct?")
+        print("1. Yes (press Enter)")
+        print("2. No, let me type the correct champion")
 
-                # Prediction mode - jungler hasn't been seen for a while
-                if not is_visible and config.state.last_seen_time:
-                    time_since_seen = current_time - config.state.last_seen_time
+        try:
+            choice = input("[INPUT] Enter choice (1 or 2): ").strip()
+            if choice == "2":
+                return self._manual_jungler_input()
+            return detected_jungler
+        except:
+            return detected_jungler
 
-                    if time_since_seen > config.settings.prediction_delay_seconds:
-                        prediction = jungle_predictor.predict(current_time)
+    def _manual_jungler_input(self) -> str:
+        """Ask user to manually input the enemy jungler name."""
+        print("\n[INPUT] Enter the enemy jungler's champion name:")
+        try:
+            jungler = input("> ").strip()
+            if jungler:
+                return jungler
+        except:
+            pass
+        return ""
 
-                        if prediction:
-                            config.state.prediction_active = True
-                            config.state.predicted_zone = prediction.zone.name
+    def _capture_minimap(self) -> Optional[np.ndarray]:
+        """Capture minimap region."""
+        if not self._minimap_config:
+            return None
+        try:
+            region = {
+                "left": self._minimap_config.x,
+                "top": self._minimap_config.y,
+                "width": self._minimap_config.width,
+                "height": self._minimap_config.height
+            }
+            screenshot = self._sct.grab(region)
+            return np.array(screenshot)[:, :, :3]  # BGR
+        except Exception as e:
+            print(f"[ERROR] Capture failed: {e}")
+            return None
 
-                            # Update overlay with prediction
-                            confidence_str = f"{int(prediction.confidence * 100)}%"
-                            tracker_overlay.update_position(
-                                prediction.zone.display_name,
-                                time_since_seen,
-                                confidence_str,
-                                prediction.zone.threat_level,
-                                is_prediction=True
-                            )
+    def _detect_enemy_visible(self, minimap: np.ndarray) -> bool:
+        """
+        Detect if enemy champion icon is visible on minimap.
 
-                            # Alert for dangerous predicted zones
-                            if prediction.zone.threat_level == ThreatLevel.DANGER:
-                                voice_system.alert_predicted(
-                                    prediction.zone,
-                                    prediction.confidence,
-                                    self._enemy_jungler
-                                )
+        Enemy icons have a red circular border. We look for:
+        - Red color in HSV space
+        - Circular shape
+        - Appropriate size for champion icons
+        - Not at the very edges (those are usually UI elements)
+        """
+        if minimap is None:
+            return False
 
-                    elif config.state.last_seen_zone:
-                        # Show last known position
-                        last_zone = detection.zone
-                        if last_zone:
-                            tracker_overlay.update_position(
-                                last_zone.display_name,
-                                time_since_seen,
-                                "last known",
-                                last_zone.threat_level,
-                                is_prediction=False
-                            )
+        height, width = minimap.shape[:2]
 
-                last_visible = is_visible
-                if zone:
-                    last_zone_name = zone_name
+        # Crop out edges (UI elements, not actual minimap)
+        margin = int(width * 0.08)
+        cropped = minimap[margin:height-margin, margin:width-margin]
 
-            # Maintain scan rate
-            elapsed = time.time() - loop_start
-            if elapsed < scan_interval:
-                time.sleep(scan_interval - elapsed)
+        if cropped.size == 0:
+            return False
 
-    def _end_tracking(self):
-        """Clean up after tracking ends."""
-        print("\n[STATUS] Ending tracking session...")
+        # Convert to HSV
+        hsv = cv2.cvtColor(cropped, cv2.COLOR_BGR2HSV)
 
-        self._tracking = False
-        self._game_active = False
-        config.state.is_running = False
+        # Red color detection (red wraps around in HSV)
+        lower_red1 = np.array([0, 150, 100])  # More strict saturation
+        upper_red1 = np.array([8, 255, 255])
+        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
 
-        # Save logs
-        detection_logger.end_game_session()
+        lower_red2 = np.array([172, 150, 100])
+        upper_red2 = np.array([180, 255, 255])
+        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
 
-        # Print stats
-        stats = detection_logger.get_stats()
-        if stats:
-            print(f"\n[STATS] Session Summary:")
-            print(f"  - Total detections: {stats.get('total_detections', 0)}")
-            print(f"  - Alerts triggered: {stats.get('alerts_triggered', 0)}")
-            print(f"  - Game duration: {int(stats.get('game_duration', 0) / 60)}m")
+        red_mask = cv2.bitwise_or(mask1, mask2)
 
-        # Reset systems
-        champion_detector.reset()
-        jungle_predictor.reset()
-        config.reset_state()
+        # Clean up noise
+        kernel = np.ones((2, 2), np.uint8)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
 
-        tracker_overlay.clear_position()
+        # Find contours
+        contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Look for champion icon sized circles
+        min_icon_area = 80   # Minimum area for champion icon
+        max_icon_area = 800  # Maximum area
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+
+            if min_icon_area < area < max_icon_area:
+                # Check circularity
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter > 0:
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+
+                    # Champion icons are fairly circular (circularity > 0.5)
+                    if circularity > 0.5:
+                        return True
+
+        return False
+
+    def _tracking_loop(self):
+        """Main tracking loop using grid-based template matching."""
+        last_visible = False
+        visible_frames = 0
+        invisible_frames = 0
+
+        # Require multiple frames to confirm state change (reduces flickering)
+        CONFIRM_FRAMES = 3
+
+        print(f"[STATUS] Now tracking {self._enemy_jungler} on minimap...")
+        tracker_overlay.update_status("Tracking...")
+
+        while self._running and is_game_active():
+            minimap = self._capture_minimap()
+            if minimap is None:
+                time.sleep(0.1)
+                continue
+
+            # Use grid-based template matching
+            is_visible, cell_position = grid_detector.detect(minimap)
+
+            # Debounce detection
+            if is_visible:
+                visible_frames += 1
+                invisible_frames = 0
+            else:
+                invisible_frames += 1
+                visible_frames = 0
+
+            # Only change state after consistent detection
+            if visible_frames >= CONFIRM_FRAMES and not last_visible:
+                # Just appeared
+                last_visible = True
+                tracker_overlay.set_visible(True)
+                tracker_overlay.update_status("ENEMY JUNGLER APPEARED")
+                tracker_overlay.show_alert(f"⚠ {self._enemy_jungler} APPEARED!")
+                print(f"[APPEARED] {self._enemy_jungler} detected on minimap!")
+
+            elif invisible_frames >= CONFIRM_FRAMES and last_visible:
+                # Just disappeared
+                last_visible = False
+                tracker_overlay.set_visible(False)
+                tracker_overlay.update_status("Enemy jungler not detected")
+                print(f"[GONE] {self._enemy_jungler} no longer visible")
+
+            time.sleep(0.066)  # ~15 fps
+
+        print("[STATUS] Game ended")
         tracker_overlay.update_status("Game ended")
-        tracker_overlay.update_jungler("")
+        grid_detector.reset()
 
-        print("[STATUS] Ready for next game...\n")
+    def _tracking_loop_test(self):
+        """Test tracking loop - doesn't require game API."""
+        last_visible = False
+        visible_frames = 0
+        invisible_frames = 0
+        CONFIRM_FRAMES = 2  # Reduced for faster response
+
+        print(f"\n[TEST] Now tracking {self._enemy_jungler} on minimap...")
+        print("[TEST] Press Ctrl+C to stop and test another champion")
+        print("[TEST] Confidence scores: appear > 0.15, disappear < 0.10")
+        print("[TEST] Debug images saved every 5 seconds to: lol-jungler-tracker/debug/")
+        print("-" * 50)
+        tracker_overlay.update_status("Tracking (TEST MODE)")
+
+        last_print_time = 0
+        last_debug_save = 0
+        frame_count = 0
+
+        try:
+            while self._running:
+                minimap = self._capture_minimap()
+                if minimap is None:
+                    time.sleep(0.1)
+                    continue
+
+                # Use grid-based template matching
+                is_visible, cell_position = grid_detector.detect(minimap)
+                confidence = grid_detector.get_last_confidence()
+
+                frame_count += 1
+
+                # Print confidence every ~1 second for debugging
+                current_time = time.time()
+                if current_time - last_print_time >= 1.0:
+                    status = "DETECTED!" if is_visible else "not found"
+                    print(f"[TEST] Confidence: {confidence:.3f} | {self._enemy_jungler}: {status}")
+                    last_print_time = current_time
+
+                # Save debug images every 10 seconds
+                if current_time - last_debug_save >= 10.0:
+                    grid_detector.save_debug_image(minimap, "test")
+                    last_debug_save = current_time
+
+                # Debounce detection
+                if is_visible:
+                    visible_frames += 1
+                    invisible_frames = 0
+                else:
+                    invisible_frames += 1
+                    visible_frames = 0
+
+                # Only change state after consistent detection
+                if visible_frames >= CONFIRM_FRAMES and not last_visible:
+                    last_visible = True
+                    tracker_overlay.set_visible(True)
+                    tracker_overlay.update_status("ENEMY JUNGLER APPEARED")
+                    tracker_overlay.show_alert(f"⚠ {self._enemy_jungler} APPEARED!")
+                    print(f"[TEST DETECTED] {self._enemy_jungler} found! (confidence: {confidence:.3f})")
+
+                elif invisible_frames >= CONFIRM_FRAMES and last_visible:
+                    last_visible = False
+                    tracker_overlay.set_visible(False)
+                    tracker_overlay.update_status("Enemy jungler not detected")
+                    print(f"[TEST GONE] {self._enemy_jungler} no longer visible (confidence: {confidence:.3f})")
+
+                time.sleep(0.066)  # ~15 fps
+
+        except KeyboardInterrupt:
+            print("\n[TEST] Stopping test...")
+            grid_detector.reset()
 
     def stop(self):
-        """Stop the tracker."""
-        print("\n[STATUS] Shutting down...")
-
+        """Stop tracker."""
         self._running = False
-        self._tracking = False
-
-        # Shutdown systems
-        voice_system.shutdown()
         tracker_overlay.stop()
-
-        if detection_logger._current_log_file:
-            detection_logger.end_game_session()
-
         print("[STATUS] Goodbye!")
 
 
 def main():
-    """Main entry point."""
-    # Check Python version
     if sys.version_info < (3, 8):
-        print("Error: Python 3.8 or higher is required")
+        print("Error: Python 3.8+ required")
         sys.exit(1)
 
-    # Try to enable DPI awareness on Windows
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:
+    except:
         pass
 
-    # Create and start tracker
-    tracker = JunglerTracker()
+    # Check for test mode
+    test_mode = "--test" in sys.argv or "-t" in sys.argv
 
-    try:
-        tracker.start()
-    except Exception as e:
-        print(f"\n[ERROR] Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
-        tracker.stop()
-        sys.exit(1)
+    tracker = SimpleJunglerTracker(test_mode=test_mode)
+    tracker.start()
 
 
 if __name__ == "__main__":

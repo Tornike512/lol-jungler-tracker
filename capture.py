@@ -1,13 +1,29 @@
 """
 Screen capture and minimap detection for League of Legends.
 Handles resolution-independent minimap location detection.
+
+DEBUG MODE: Saves calibration images and minimap captures.
 """
 import numpy as np
 import cv2
 import mss
 import time
+import os
+from datetime import datetime
 from typing import Optional, Tuple
-from config import config, MinimapCalibration
+from config import config, MinimapCalibration, BASE_DIR
+
+
+# Debug directory
+DEBUG_DIR = os.path.join(BASE_DIR, "debug")
+os.makedirs(DEBUG_DIR, exist_ok=True)
+
+
+def debug_log(message: str):
+    """Print debug message with timestamp."""
+    if config.settings.debug_mode:
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"[DEBUG {timestamp}] {message}")
 
 
 class ScreenCapture:
@@ -17,21 +33,28 @@ class ScreenCapture:
         self.sct = mss.mss()
         self._minimap_template = None
         self._last_calibration_time = 0
-        self._calibration_interval = 60  # Re-calibrate every 60 seconds
+        self._calibration_interval = 300  # Only re-calibrate every 5 minutes (minimap doesn't move)
+        self._capture_count = 0
+        self._validation_fail_count = 0
+        self._max_validation_fails = 10  # Only recalibrate after 10 consecutive failures
 
     def capture_screen(self) -> Optional[np.ndarray]:
         """Capture the entire primary screen."""
         try:
             monitor = self.sct.monitors[1]  # Primary monitor
             screenshot = self.sct.grab(monitor)
-            return np.array(screenshot)[:, :, :3]  # Remove alpha channel, BGR format
+            img = np.array(screenshot)[:, :, :3]  # Remove alpha channel, BGR format
+            debug_log(f"Screen captured: {img.shape[1]}x{img.shape[0]}")
+            return img
         except Exception as e:
             print(f"[ERROR] Screen capture failed: {e}")
+            debug_log(f"Screen capture error: {e}")
             return None
 
     def capture_minimap(self) -> Optional[np.ndarray]:
         """Capture just the minimap region."""
         if not config.minimap.is_valid:
+            debug_log("Minimap capture failed: calibration invalid")
             return None
 
         try:
@@ -42,9 +65,21 @@ class ScreenCapture:
                 "height": config.minimap.height
             }
             screenshot = self.sct.grab(region)
-            return np.array(screenshot)[:, :, :3]
+            minimap = np.array(screenshot)[:, :, :3]
+
+            self._capture_count += 1
+
+            # Debug: save minimap periodically
+            if config.settings.debug_mode and self._capture_count % 75 == 1:  # Every 5 seconds at 15fps
+                timestamp = datetime.now().strftime("%H%M%S")
+                path = os.path.join(DEBUG_DIR, f"minimap_capture_{timestamp}.png")
+                cv2.imwrite(path, minimap)
+                debug_log(f"Saved minimap capture: {path}")
+
+            return minimap
         except Exception as e:
             print(f"[ERROR] Minimap capture failed: {e}")
+            debug_log(f"Minimap capture error: {e}")
             return None
 
     def detect_minimap(self, screen: np.ndarray) -> Optional[MinimapCalibration]:
@@ -61,35 +96,43 @@ class ScreenCapture:
         height, width = screen.shape[:2]
         gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
 
+        debug_log(f"Detecting minimap in screen {width}x{height}")
+
         # Strategy 1: Check standard minimap positions (corners)
         # Minimap is typically 200-280 pixels depending on settings
-        minimap_sizes = [280, 260, 240, 220, 200, 180]
+        minimap_sizes = [280, 260, 240, 220, 200, 180, 160, 300, 320]
 
         # Check bottom-right corner first (most common)
         for size in minimap_sizes:
             # Bottom-right
-            roi = self._check_minimap_region(
-                screen, gray, width - size - 10, height - size - 10, size
-            )
+            x_pos = width - size - 10
+            y_pos = height - size - 10
+            roi = self._check_minimap_region(screen, gray, x_pos, y_pos, size)
             if roi is not None:
+                debug_log(f"Found minimap at bottom-right: ({x_pos}, {y_pos}) size={size}")
                 return MinimapCalibration(
-                    x=width - size - 10,
-                    y=height - size - 10,
+                    x=x_pos,
+                    y=y_pos,
                     width=size,
                     height=size,
                     side="right"
                 )
 
             # Bottom-left (for players who moved minimap)
-            roi = self._check_minimap_region(screen, gray, 10, height - size - 10, size)
+            x_pos = 10
+            y_pos = height - size - 10
+            roi = self._check_minimap_region(screen, gray, x_pos, y_pos, size)
             if roi is not None:
+                debug_log(f"Found minimap at bottom-left: ({x_pos}, {y_pos}) size={size}")
                 return MinimapCalibration(
-                    x=10,
-                    y=height - size - 10,
+                    x=x_pos,
+                    y=y_pos,
                     width=size,
                     height=size,
                     side="left"
                 )
+
+        debug_log("Standard position detection failed, trying edge detection...")
 
         # Strategy 2: Use edge detection to find minimap border
         edges = cv2.Canny(gray, 50, 150)
@@ -101,11 +144,13 @@ class ScreenCapture:
             if 150 < w < 350 and 150 < h < 350 and 0.85 < w/h < 1.15:
                 # Check if it's in a corner (likely minimap position)
                 if (x < 50 or x > width - 400) and y > height - 400:
+                    debug_log(f"Found minimap via contour: ({x}, {y}) size={w}x{h}")
                     return MinimapCalibration(
                         x=x, y=y, width=w, height=h,
                         side="left" if x < width // 2 else "right"
                     )
 
+        debug_log("Minimap detection failed!")
         return None
 
     def _check_minimap_region(
@@ -146,6 +191,9 @@ class ScreenCapture:
             # 3. Check contrast (minimap has distinct features)
             contrast = np.std(roi_gray)
 
+            if config.settings.debug_mode:
+                debug_log(f"  Region ({x},{y}) size={size}: green={green_ratio:.2f}, gray={gray_ratio:.2f}, contrast={contrast:.1f}")
+
             # Minimap should have:
             # - Some green (5-40%)
             # - Some gray/dark areas (10-60%)
@@ -154,7 +202,8 @@ class ScreenCapture:
                 return roi
 
             return None
-        except Exception:
+        except Exception as e:
+            debug_log(f"  Region check error: {e}")
             return None
 
     def calibrate(self) -> bool:
@@ -169,6 +218,13 @@ class ScreenCapture:
             print("[ERROR] Failed to capture screen for calibration")
             return False
 
+        # Debug: Save the full screen for analysis
+        if config.settings.debug_mode:
+            timestamp = datetime.now().strftime("%H%M%S")
+            screen_path = os.path.join(DEBUG_DIR, f"fullscreen_{timestamp}.png")
+            cv2.imwrite(screen_path, screen)
+            debug_log(f"Saved fullscreen: {screen_path}")
+
         calibration = self.detect_minimap(screen)
         if calibration is None:
             print("[ERROR] Could not detect minimap. Make sure League of Legends is running.")
@@ -176,6 +232,14 @@ class ScreenCapture:
 
         config.minimap = calibration
         config.save_calibration()
+
+        # Debug: Save the detected minimap region
+        if config.settings.debug_mode:
+            minimap_region = screen[calibration.y:calibration.y+calibration.height,
+                                    calibration.x:calibration.x+calibration.width]
+            minimap_path = os.path.join(DEBUG_DIR, f"calibrated_minimap_{timestamp}.png")
+            cv2.imwrite(minimap_path, minimap_region)
+            debug_log(f"Saved calibrated minimap: {minimap_path}")
 
         print(f"[STATUS] Minimap found at ({calibration.x}, {calibration.y}), "
               f"size: {calibration.width}x{calibration.height}, side: {calibration.side}")
@@ -192,6 +256,9 @@ class ScreenCapture:
         """
         Validate that current calibration is still correct.
         Quick check without full re-calibration.
+
+        Uses consecutive failure counting to avoid recalibrating when
+        Tab screen or other UI overlays temporarily cover the minimap.
         """
         if not config.minimap.is_valid:
             return False
@@ -207,7 +274,23 @@ class ScreenCapture:
         green_mask = cv2.inRange(hsv, lower_green, upper_green)
         green_ratio = np.sum(green_mask > 0) / (minimap.shape[0] * minimap.shape[1])
 
-        return 0.03 < green_ratio < 0.5
+        is_valid = 0.03 < green_ratio < 0.5
+
+        if is_valid:
+            # Reset failure count on success
+            self._validation_fail_count = 0
+            return True
+        else:
+            # Track consecutive failures
+            self._validation_fail_count += 1
+            if self._validation_fail_count <= self._max_validation_fails:
+                # Don't trigger recalibration yet - could be tab screen
+                debug_log(f"Validation check failed ({self._validation_fail_count}/{self._max_validation_fails}): green_ratio={green_ratio:.2f} - skipping recalibration")
+                return True  # Pretend it's valid to avoid recalibration spam
+            else:
+                debug_log(f"Calibration validation failed after {self._validation_fail_count} attempts: green_ratio={green_ratio:.2f}")
+                self._validation_fail_count = 0  # Reset for next time
+                return False
 
 
 # Global screen capture instance
