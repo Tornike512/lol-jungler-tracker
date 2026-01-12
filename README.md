@@ -55,7 +55,3 @@ lol-jungler-tracker/
 ├── config.py        # Settings
 └── requirements.txt
 ```
-
-## License
-
-MIT
