@@ -5,12 +5,15 @@ import mss
 import sys
 import requests
 import os
+import time  # Imported for timestamping debug images
 
 # --- CONFIGURATION ---
 TEMPLATE_NAME = 'champion_circle.png'
 TARGET_SIZE = 20  # Keep this small for minimaps
-MATCH_CONFIDENCE = 0.95 
+MATCH_CONFIDENCE = 0.95
+DEBUG_DIR = "debug"  # Folder to store debug screenshots
 # ---------------------
+
 
 def create_circular_mask(h, w):
     """Creates a boolean mask with a white circle in the middle"""
@@ -21,9 +24,10 @@ def create_circular_mask(h, w):
     mask = dist_from_center <= radius
     return mask
 
+
 def download_and_circular_crop(champion_name):
     print(f"Downloading '{champion_name}' and cropping to circle...")
-    
+
     try:
         version_url = "https://ddragon.leagueoflegends.com/api/versions.json"
         r = requests.get(version_url)
@@ -33,46 +37,55 @@ def download_and_circular_crop(champion_name):
         print(f"Error fetching version: {e}")
         return False
 
-    formatted_name = "".join([word.capitalize() for word in champion_name.split()])
+    formatted_name = "".join([word.capitalize()
+                             for word in champion_name.split()])
     formatted_name = formatted_name.replace("'", "").replace(".", "")
     image_url = f"https://ddragon.leagueoflegends.com/cdn/{latest_version}/img/champion/{formatted_name}.png"
-    
+
     try:
         img_response = requests.get(image_url)
         if img_response.status_code != 200:
             print(f"Error: Champion not found.")
             return False
-        
+
         nparr = np.frombuffer(img_response.content, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
+
         # 1. Resize to target size
-        resized_img = cv2.resize(img, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_AREA)
-        
+        resized_img = cv2.resize(
+            img, (TARGET_SIZE, TARGET_SIZE), interpolation=cv2.INTER_AREA)
+
         # 2. Create the Circular Mask
         h, w = resized_img.shape[:2]
         mask = create_circular_mask(h, w)
-        
+
         # 3. Apply Mask (Make corners black/transparent)
         # We set pixels outside the circle to 0 (black)
         circular_img = resized_img.copy()
         circular_img[~mask] = 0
-        
+
         # 4. Save the circular template
         cv2.imwrite(TEMPLATE_NAME, circular_img)
         print(f"Successfully created circular template '{TEMPLATE_NAME}'")
         return True
-        
+
     except Exception as e:
         print(f"Download failed: {e}")
         return False
 
 # --- MAIN PROGRAM ---
+
+
 def main():
     champion_input = input("Enter Champion Name (e.g., 'Lee Sin'): ")
-    
+
     if not download_and_circular_crop(champion_input):
         sys.exit()
+
+    # Setup Debug Directory
+    if not os.path.exists(DEBUG_DIR):
+        os.makedirs(DEBUG_DIR)
+        print(f"Created '{DEBUG_DIR}' folder.")
 
     # Setup Vision
     try:
@@ -80,12 +93,12 @@ def main():
         if template is None:
             print("Error loading image.")
             sys.exit()
-        
+
         # To use masks, we usually work in Color (BGR), but matching is faster in Grayscale.
         # However, standard matchTemplate with masks is tricky in OpenCV Python.
         # We will convert to grayscale for the mask.
         template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-        
+
         # Create a grayscale mask (255 for circle, 0 for background)
         h, w = template_gray.shape[:2]
         mask_bool = create_circular_mask(h, w)
@@ -109,7 +122,8 @@ def main():
 
     root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
 
-    status_label = tk.Label(root, text=f"SEARCHING\n{champion_input}", font=("Helvetica", 10, "bold"), bg="red", fg="white")
+    status_label = tk.Label(root, text=f"SEARCHING\n{champion_input}", font=(
+        "Helvetica", 10, "bold"), bg="red", fg="white")
     status_label.pack(fill="both", expand=True)
 
     def close_app(event=None):
@@ -117,45 +131,87 @@ def main():
         sys.exit()
     root.bind("<Escape>", close_app)
 
+    # State variable to track if we have saved the debug image for the current detection
+    debug_captured = [False]
+
     # Scanning Loop
     def scan_screen():
         with mss.mss() as sct:
-            monitor = sct.monitors[0] 
+            # 1. Get full monitor dimensions
+            full_mon = sct.monitors[0]
+
+            # 2. Divide screen into 6 parts (3 columns x 2 rows)
+            part_width = full_mon['width'] // 3
+            part_height = full_mon['height'] // 2
+
+            # 3. Define the "Right Bottom" region
+            # Left starts at 2/3rds of the screen width
+            # Top starts at 1/2 of the screen height
+            monitor = {
+                "top": full_mon['top'] + part_height,
+                "left": full_mon['left'] + (part_width * 2),
+                "width": part_width,
+                "height": part_height
+            }
+
+            # Capture only that specific region
             screenshot = np.array(sct.grab(monitor))
-        
+
         screen_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
         found = None
 
         # Note: We use TM_CCORR_NORMED because it supports MASKS.
         # TM_CCOEFF_NORMED does not support masks in standard OpenCV Python builds.
-        
+
         for scale in np.linspace(1.0, 2.5, 15):
             # Resize template and mask
-            resized_template = cv2.resize(template_gray, (int(w * scale), int(h * scale)))
-            resized_mask = cv2.resize(template_mask, (int(w * scale), int(h * scale)))
-            
+            resized_template = cv2.resize(
+                template_gray, (int(w * scale), int(h * scale)))
+            resized_mask = cv2.resize(
+                template_mask, (int(w * scale), int(h * scale)))
+
             if resized_template.shape[0] > screen_gray.shape[0] or resized_template.shape[1] > screen_gray.shape[1]:
                 continue
 
             # MATCH WITH MASK
-            result = cv2.matchTemplate(screen_gray, resized_template, cv2.TM_CCORR_NORMED, mask=resized_mask)
-            
+            result = cv2.matchTemplate(
+                screen_gray, resized_template, cv2.TM_CCORR_NORMED, mask=resized_mask)
+
             (_, maxVal, _, maxLoc) = cv2.minMaxLoc(result)
 
             if found is None or maxVal > found[0]:
                 found = (maxVal, maxLoc, scale)
 
-        # Update GUI
+        # Update GUI and handle Debug
         if found is not None and found[0] >= MATCH_CONFIDENCE:
-            status_label.config(bg="green", text=f"DETECTED!\n{champion_input}")
+            status_label.config(
+                bg="green", text=f"DETECTED!\n{champion_input}")
+
+            # Check if we haven't saved a screenshot for this specific detection event yet
+            if not debug_captured[0]:
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                filename = os.path.join(
+                    DEBUG_DIR, f"detection_{timestamp}.png")
+
+                # Save the raw screenshot (mss returns BGRA, cv2 handles saving it fine)
+                # Note: This will now save only the cropped region
+                cv2.imwrite(filename, screenshot)
+                print(
+                    f"[DEBUG] Champion detected! Screenshot saved to: {filename}")
+
+                # Set to True so we don't save 50 screenshots per second while detected
+                debug_captured[0] = True
         else:
             status_label.config(bg="red", text=f"SEARCHING\n{champion_input}")
+            # Reset the flag so we capture again the NEXT time it is detected
+            debug_captured[0] = False
 
         root.after(50, scan_screen)
 
     print(f"Tracking {champion_input} (Circular Mask)...")
     scan_screen()
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
