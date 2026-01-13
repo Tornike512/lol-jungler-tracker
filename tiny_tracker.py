@@ -5,12 +5,13 @@ import mss
 import sys
 import requests
 import os
+import time
 
 # --- CONFIGURATION ---
 TEMPLATE_NAME = 'champion_circle.png'
 TARGET_SIZE = 20  # Keep this small for minimaps
 MATCH_CONFIDENCE = 0.90
-
+DEBUG_DIR = "debug"
 # ---------------------
 
 
@@ -81,6 +82,11 @@ def main():
     if not download_and_circular_crop(champion_input):
         sys.exit()
 
+    # Setup Debug Directory
+    if not os.path.exists(DEBUG_DIR):
+        os.makedirs(DEBUG_DIR)
+        print(f"Created '{DEBUG_DIR}' folder.")
+
     # Setup Vision
     try:
         template = cv2.imread(TEMPLATE_NAME, cv2.IMREAD_COLOR)
@@ -128,6 +134,9 @@ def main():
         root.destroy()
         sys.exit()
     root.bind("<Escape>", close_app)
+
+    # State variable to track if we have saved the debug image for the current detection
+    debug_captured = [False]
 
     # Scanning Loop
     def scan_screen():
@@ -184,13 +193,50 @@ def main():
             confidence_label.config(text=f"Conf: {found[0]:.2f}")
             status_label.config(
                 bg="green", text=f"DETECTED!\n{champion_input}")
+            
+            # Draw rectangle around detection
+            (maxVal, maxLoc, scale) = found
+            scaled_w = int(w * scale)
+            scaled_h = int(h * scale)
+            top_left = maxLoc
+            bottom_right = (top_left[0] + scaled_w, top_left[1] + scaled_h)
+            
+            # Create a copy to draw on
+            display_img = screenshot_bgr.copy()
+            # Draw thicker green rectangle
+            cv2.rectangle(display_img, top_left, bottom_right, (0, 255, 0), 3)
+            # Add detection info text
+            cv2.putText(display_img, f"{champion_input}", 
+                       (top_left[0], top_left[1] - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            print(f"[DEBUG] Detection at {top_left}, size: {scaled_w}x{scaled_h}, scale: {scale:.2f}, conf: {maxVal:.2f}")
+            
+            # Display the image with the rectangle
+            cv2.imshow('Detection', display_img)
+            cv2.waitKey(1)
+            
+            # Save screenshot once per detection
+            if not debug_captured[0]:
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                filename = os.path.join(DEBUG_DIR, f"detection_{timestamp}.png")
+                cv2.imwrite(filename, display_img)
+                print(f"[DEBUG] Screenshot saved to: {filename}")
+                debug_captured[0] = True
         else:
             if found is not None:
                 confidence_label.config(text=f"Conf: {found[0]:.2f}")
             else:
                 confidence_label.config(text="Conf: 0.00")
             status_label.config(bg="red", text=f"SEARCHING\n{champion_input}")
-            # Reset the flag so we capture again the NEXT time it is detected
+            
+            # Close detection windows when not detecting
+            try:
+                cv2.destroyWindow('Detection')
+            except:
+                pass
+            
+            # Reset flag to capture next detection
             debug_captured[0] = False
 
         root.after(50, scan_screen)
