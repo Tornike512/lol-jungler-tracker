@@ -5,13 +5,12 @@ import mss
 import sys
 import requests
 import os
-import time  # Imported for timestamping debug images
 
 # --- CONFIGURATION ---
 TEMPLATE_NAME = 'champion_circle.png'
 TARGET_SIZE = 20  # Keep this small for minimaps
-MATCH_CONFIDENCE = 0.95
-DEBUG_DIR = "debug"  # Folder to store debug screenshots
+MATCH_CONFIDENCE = 0.90
+
 # ---------------------
 
 
@@ -82,11 +81,6 @@ def main():
     if not download_and_circular_crop(champion_input):
         sys.exit()
 
-    # Setup Debug Directory
-    if not os.path.exists(DEBUG_DIR):
-        os.makedirs(DEBUG_DIR)
-        print(f"Created '{DEBUG_DIR}' folder.")
-
     # Setup Vision
     try:
         template = cv2.imread(TEMPLATE_NAME, cv2.IMREAD_COLOR)
@@ -126,13 +120,14 @@ def main():
         "Helvetica", 10, "bold"), bg="red", fg="white")
     status_label.pack(fill="both", expand=True)
 
+    confidence_label = tk.Label(root, text="Conf: 0.00", font=(
+        "Helvetica", 8), bg="black", fg="white")
+    confidence_label.place(relx=1.0, rely=0, anchor="ne")
+
     def close_app(event=None):
         root.destroy()
         sys.exit()
     root.bind("<Escape>", close_app)
-
-    # State variable to track if we have saved the debug image for the current detection
-    debug_captured = [False]
 
     # Scanning Loop
     def scan_screen():
@@ -156,8 +151,10 @@ def main():
 
             # Capture only that specific region
             screenshot = np.array(sct.grab(monitor))
+            # Convert BGRA to BGR for proper saving and processing
+            screenshot_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
 
-        screen_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+        screen_gray = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
         found = None
 
         # Note: We use TM_CCORR_NORMED because it supports MASKS.
@@ -182,26 +179,16 @@ def main():
             if found is None or maxVal > found[0]:
                 found = (maxVal, maxLoc, scale)
 
-        # Update GUI and handle Debug
+        # Update GUI
         if found is not None and found[0] >= MATCH_CONFIDENCE:
+            confidence_label.config(text=f"Conf: {found[0]:.2f}")
             status_label.config(
                 bg="green", text=f"DETECTED!\n{champion_input}")
-
-            # Check if we haven't saved a screenshot for this specific detection event yet
-            if not debug_captured[0]:
-                timestamp = time.strftime("%Y%m%d-%H%M%S")
-                filename = os.path.join(
-                    DEBUG_DIR, f"detection_{timestamp}.png")
-
-                # Save the raw screenshot (mss returns BGRA, cv2 handles saving it fine)
-                # Note: This will now save only the cropped region
-                cv2.imwrite(filename, screenshot)
-                print(
-                    f"[DEBUG] Champion detected! Screenshot saved to: {filename}")
-
-                # Set to True so we don't save 50 screenshots per second while detected
-                debug_captured[0] = True
         else:
+            if found is not None:
+                confidence_label.config(text=f"Conf: {found[0]:.2f}")
+            else:
+                confidence_label.config(text="Conf: 0.00")
             status_label.config(bg="red", text=f"SEARCHING\n{champion_input}")
             # Reset the flag so we capture again the NEXT time it is detected
             debug_captured[0] = False
