@@ -2,29 +2,39 @@
 """
 League of Legends Enemy Jungler Visibility Tracker
 ===================================================
-A safe, passive overlay that displays whether the enemy jungler is visible.
-Uses the Riot Live Client API (available during active games).
+A safe, passive overlay that displays whether the enemy jungler is visible
+on the minimap using screen capture and image recognition.
 
 Features:
-- Green indicator: Enemy jungler is visible on the map
+- Green indicator: Enemy jungler is visible on the minimap
 - Red indicator: Enemy jungler is NOT visible (be careful!)
+- Works with any screen resolution
 - Fully passive - no automated actions, just visual information
 
 Requirements:
 - Python 3.6+
-- requests library (pip install requests)
+- mss, opencv-python, numpy, Pillow, requests
 - A League of Legends game in progress
 
 Usage:
 - Run this script while in a League of Legends game
-- A small colored square will appear in the top-right corner
+- A small colored circle will appear in the top-left corner
 - The overlay stays on top of all windows
 """
 
 import tkinter as tk
 import requests
 import urllib3
-from typing import Optional, Dict, Any
+import os
+import io
+import time
+from typing import Optional, Dict, Any, Tuple
+from pathlib import Path
+
+import mss
+import cv2
+import numpy as np
+from PIL import Image
 
 # ============================================================================
 # CONFIGURATION
@@ -33,12 +43,15 @@ from typing import Optional, Dict, Any
 # Riot Live Client API endpoint (only accessible during an active game)
 API_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
 
-# How often to check the API (in milliseconds)
-# 500ms = 0.5 seconds, provides responsive updates without excessive polling
-POLL_INTERVAL_MS = 500
+# Data Dragon base URL for champion images
+DDRAGON_VERSION_URL = "https://ddragon.leagueoflegends.com/api/versions.json"
+DDRAGON_CHAMPION_URL = "https://ddragon.leagueoflegends.com/cdn/{version}/img/champion/{champion}.png"
+
+# How often to check visibility (in milliseconds)
+POLL_INTERVAL_MS = 200  # 200ms = 5 checks per second for responsive updates
 
 # Overlay appearance settings
-INDICATOR_SIZE = 40  # Size of the colored square in pixels
+INDICATOR_SIZE = 40  # Size of the colored circle in pixels
 INDICATOR_PADDING = 20  # Distance from screen edges in pixels
 
 # Colors for the visibility indicator
@@ -47,8 +60,268 @@ COLOR_INVISIBLE = "#FF0000"  # Bright red - jungler is NOT visible
 COLOR_UNKNOWN = "#FFFF00"  # Yellow - waiting for game data or error
 COLOR_NO_GAME = "#808080"  # Gray - no active game detected
 
-# Disable SSL warnings for the local Riot API (uses self-signed certificate)
+# Minimap detection settings
+# The minimap is in the bottom-right corner of the screen
+# These ratios work for standard LoL UI at any resolution
+MINIMAP_RATIO_WIDTH = 0.1425  # Minimap width as ratio of screen width
+MINIMAP_RATIO_HEIGHT = 0.253  # Minimap height as ratio of screen height
+MINIMAP_PADDING_RIGHT = 0  # Padding from right edge
+MINIMAP_PADDING_BOTTOM = 0  # Padding from bottom edge
+
+# Template matching threshold (0.0 to 1.0, higher = stricter matching)
+MATCH_THRESHOLD = 0.55  # Lowered for better detection
+
+# Champion icon size on minimap (ratio of minimap size)
+ICON_SIZE_RATIO = 0.12  # Champion icons are about 12% of minimap size
+
+# Cache directory for champion icons
+CACHE_DIR = Path(__file__).parent / "champion_icons"
+
+# Disable SSL warnings for the local Riot API
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# ============================================================================
+# DATA DRAGON / CHAMPION ICONS
+# ============================================================================
+
+def get_latest_ddragon_version() -> Optional[str]:
+    """Get the latest Data Dragon version."""
+    try:
+        response = requests.get(DDRAGON_VERSION_URL, timeout=5.0)
+        if response.status_code == 200:
+            versions = response.json()
+            return versions[0] if versions else None
+    except Exception:
+        pass
+    return None
+
+
+def download_champion_icon(champion_name: str, version: str) -> Optional[np.ndarray]:
+    """
+    Download a champion's square icon from Data Dragon.
+
+    Returns the icon as an OpenCV image (BGR format).
+    """
+    # Normalize champion name for URL (handle special cases)
+    url_name = champion_name.replace(" ", "").replace("'", "")
+
+    # Special cases for champion names that differ in Data Dragon
+    name_mappings = {
+        "Wukong": "MonkeyKing",
+        "Cho'Gath": "Chogath",
+        "Kha'Zix": "Khazix",
+        "Kai'Sa": "Kaisa",
+        "Bel'Veth": "Belveth",
+        "Vel'Koz": "Velkoz",
+        "Rek'Sai": "RekSai",
+        "Kog'Maw": "KogMaw",
+        "LeBlanc": "Leblanc",
+        "Nunu & Willump": "Nunu",
+    }
+
+    if champion_name in name_mappings:
+        url_name = name_mappings[champion_name]
+
+    url = DDRAGON_CHAMPION_URL.format(version=version, champion=url_name)
+
+    try:
+        response = requests.get(url, timeout=5.0)
+        if response.status_code == 200:
+            # Convert to OpenCV format
+            image_data = io.BytesIO(response.content)
+            pil_image = Image.open(image_data).convert("RGB")
+            cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            return cv_image
+    except Exception as e:
+        print(f"Failed to download icon for {champion_name}: {e}")
+
+    return None
+
+
+def get_champion_icon(champion_name: str) -> Optional[np.ndarray]:
+    """
+    Get a champion icon, using cache if available.
+
+    Returns the icon as an OpenCV image (BGR format).
+    """
+    # Create cache directory if it doesn't exist
+    CACHE_DIR.mkdir(exist_ok=True)
+
+    # Check cache first
+    cache_file = CACHE_DIR / f"{champion_name}.png"
+
+    if cache_file.exists():
+        img = cv2.imread(str(cache_file))
+        if img is not None:
+            return img
+
+    # Download from Data Dragon
+    version = get_latest_ddragon_version()
+    if version is None:
+        print("Could not get Data Dragon version")
+        return None
+
+    icon = download_champion_icon(champion_name, version)
+
+    if icon is not None:
+        # Cache the icon
+        cv2.imwrite(str(cache_file), icon)
+        return icon
+
+    return None
+
+
+# ============================================================================
+# MINIMAP DETECTION
+# ============================================================================
+
+class MinimapDetector:
+    """
+    Detects the minimap region and searches for champion icons on it.
+    """
+
+    def __init__(self):
+        self.sct = mss.mss()
+        self._update_screen_info()
+        self.champion_template = None
+        self.champion_name = None
+        # Keep multiple scaled templates for better matching
+        self.scaled_templates = []
+
+    def _update_screen_info(self):
+        """Update screen dimensions and minimap region."""
+        # Get primary monitor info
+        monitor = self.sct.monitors[1]  # monitors[0] is all monitors combined
+        self.screen_width = monitor["width"]
+        self.screen_height = monitor["height"]
+
+        # Calculate minimap region based on screen size
+        # The minimap is in the bottom-right corner
+        minimap_width = int(self.screen_width * MINIMAP_RATIO_WIDTH)
+        minimap_height = int(self.screen_height * MINIMAP_RATIO_HEIGHT)
+
+        # Minimap position
+        self.minimap_left = self.screen_width - minimap_width - MINIMAP_PADDING_RIGHT
+        self.minimap_top = self.screen_height - minimap_height - MINIMAP_PADDING_BOTTOM
+        self.minimap_width = minimap_width
+        self.minimap_height = minimap_height
+
+        # Calculate expected icon size on minimap
+        self.icon_size = int(min(minimap_width, minimap_height) * ICON_SIZE_RATIO)
+
+        print(f"Screen: {self.screen_width}x{self.screen_height}")
+        print(f"Minimap region: ({self.minimap_left}, {self.minimap_top}) - {minimap_width}x{minimap_height}")
+        print(f"Expected icon size: {self.icon_size}px")
+
+    def set_champion(self, champion_name: str) -> bool:
+        """
+        Set the champion to search for on the minimap.
+
+        Returns True if the champion icon was loaded successfully.
+        """
+        if champion_name == self.champion_name and self.champion_template is not None:
+            return True  # Already loaded
+
+        self.champion_name = champion_name
+        icon = get_champion_icon(champion_name)
+
+        if icon is None:
+            print(f"Could not load icon for {champion_name}")
+            self.champion_template = None
+            self.scaled_templates = []
+            return False
+
+        # Create the main template at the expected icon size
+        self.champion_template = self._prepare_template(icon, self.icon_size)
+
+        # Create multiple scaled versions for better matching at different zoom levels
+        self.scaled_templates = []
+        for scale in [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]:
+            size = int(self.icon_size * scale)
+            if size > 5:  # Minimum reasonable size
+                template = self._prepare_template(icon, size)
+                self.scaled_templates.append((scale, template))
+
+        print(f"Loaded icon for {champion_name} ({len(self.scaled_templates)} scale variants)")
+        return True
+
+    def _prepare_template(self, icon: np.ndarray, size: int) -> np.ndarray:
+        """
+        Prepare a champion icon as a template for matching.
+
+        The icon is resized and processed to improve matching accuracy.
+        """
+        # Resize to expected size on minimap
+        template = cv2.resize(icon, (size, size), interpolation=cv2.INTER_AREA)
+
+        # Create a circular mask (minimap icons are circular)
+        mask = np.zeros((size, size), dtype=np.uint8)
+        center = size // 2
+        radius = int(size * 0.45)  # Slightly smaller than half to avoid edges
+        cv2.circle(mask, (center, center), radius, 255, -1)
+
+        # Apply mask to focus on the center of the icon
+        template = cv2.bitwise_and(template, template, mask=mask)
+
+        return template
+
+    def capture_minimap(self) -> np.ndarray:
+        """
+        Capture the minimap region of the screen.
+
+        Returns the minimap as an OpenCV image (BGR format).
+        """
+        # Define the region to capture
+        region = {
+            "left": self.minimap_left,
+            "top": self.minimap_top,
+            "width": self.minimap_width,
+            "height": self.minimap_height
+        }
+
+        # Capture the region
+        screenshot = self.sct.grab(region)
+
+        # Convert to OpenCV format (mss returns BGRA)
+        img = np.array(screenshot)
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        return img
+
+    def is_champion_visible(self) -> Tuple[bool, float]:
+        """
+        Check if the tracked champion is visible on the minimap.
+
+        Returns a tuple of (is_visible, confidence).
+        """
+        if self.champion_template is None or not self.scaled_templates:
+            return False, 0.0
+
+        # Capture the minimap
+        minimap = self.capture_minimap()
+
+        # Try matching with each scaled template
+        best_confidence = 0.0
+
+        for scale, template in self.scaled_templates:
+            # Skip if template is larger than minimap
+            if template.shape[0] > minimap.shape[0] or template.shape[1] > minimap.shape[1]:
+                continue
+
+            # Perform template matching
+            result = cv2.matchTemplate(minimap, template, cv2.TM_CCOEFF_NORMED)
+
+            # Get the best match
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+            if max_val > best_confidence:
+                best_confidence = max_val
+
+        # Check if the best match exceeds our threshold
+        is_visible = best_confidence >= MATCH_THRESHOLD
+
+        return is_visible, best_confidence
 
 
 # ============================================================================
@@ -56,148 +329,49 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ============================================================================
 
 def get_game_data() -> Optional[Dict[str, Any]]:
-    """
-    Fetch all game data from the Riot Live Client API.
-
-    Returns:
-        Dictionary containing game data if successful, None otherwise.
-
-    Note:
-        The API uses HTTPS with a self-signed certificate, so we disable
-        SSL verification. This is safe because it's a local connection.
-    """
+    """Fetch all game data from the Riot Live Client API."""
     try:
-        # Make request to the local API with a short timeout
-        # verify=False is required because Riot uses a self-signed certificate
         response = requests.get(API_URL, timeout=1.0, verify=False)
-
-        # Check if the request was successful
         if response.status_code == 200:
             return response.json()
-        else:
-            return None
-
-    except requests.exceptions.ConnectionError:
-        # API not available - game probably not running
-        return None
-    except requests.exceptions.Timeout:
-        # Request timed out
-        return None
-    except requests.exceptions.RequestException:
-        # Any other request error
-        return None
-    except ValueError:
-        # JSON parsing error
-        return None
+    except Exception:
+        pass
+    return None
 
 
 def get_active_player_team(game_data: Dict[str, Any]) -> Optional[str]:
-    """
-    Determine which team the active player (you) is on.
-
-    Args:
-        game_data: The full game data from the API.
-
-    Returns:
-        "ORDER" (blue side) or "CHAOS" (red side), or None if not found.
-    """
+    """Determine which team the active player is on."""
     try:
-        # Get the active player's summoner name
         active_player_name = game_data.get("activePlayer", {}).get("summonerName")
-
         if not active_player_name:
             return None
 
-        # Find the active player in the allPlayers list to get their team
         for player in game_data.get("allPlayers", []):
             if player.get("summonerName") == active_player_name:
                 return player.get("team")
-
-        return None
-
     except (KeyError, TypeError):
-        return None
+        pass
+    return None
 
 
 def find_enemy_jungler(game_data: Dict[str, Any], my_team: str) -> Optional[Dict[str, Any]]:
-    """
-    Find the enemy jungler from the player list.
-
-    Args:
-        game_data: The full game data from the API.
-        my_team: The team the active player is on ("ORDER" or "CHAOS").
-
-    Returns:
-        Player data dictionary for the enemy jungler, or None if not found.
-    """
+    """Find the enemy jungler from the player list."""
     try:
-        all_players = game_data.get("allPlayers", [])
-
-        for player in all_players:
-            # Check if this player is on the enemy team
-            player_team = player.get("team")
-            if player_team == my_team:
-                continue  # Skip teammates
-
-            # Check if this player has the JUNGLE position
-            # The position field contains the assigned role
-            position = player.get("position", "").upper()
-
-            if position == "JUNGLE":
+        for player in game_data.get("allPlayers", []):
+            if player.get("team") == my_team:
+                continue
+            if player.get("position", "").upper() == "JUNGLE":
                 return player
-
-        return None
-
     except (KeyError, TypeError):
-        return None
+        pass
+    return None
 
 
-def is_jungler_visible(jungler_data: Dict[str, Any]) -> bool:
-    """
-    Check if the enemy jungler is currently visible on the map.
-
-    Args:
-        jungler_data: Player data dictionary for the enemy jungler.
-
-    Returns:
-        True if visible, False otherwise.
-
-    Note:
-        The Riot API provides visibility information that indicates
-        whether a champion can be seen by your team.
-    """
-    # The API doesn't directly expose isVisible in allPlayers
-    # But we can check if the champion is dead or check other indicators
-    # For now, we'll use the 'isDead' status as one indicator
-
-    # Check multiple visibility indicators
+def is_jungler_dead(jungler_data: Dict[str, Any]) -> bool:
+    """Check if the jungler is dead or respawning."""
     is_dead = jungler_data.get("isDead", False)
-
-    # If the jungler is dead, they're technically "visible" (in death state)
-    # but not a threat - we'll show as visible (green) since they can't gank
-    if is_dead:
-        return True
-
-    # Unfortunately, the Live Client API doesn't provide real-time
-    # fog of war visibility data for enemy champions in the allPlayers endpoint.
-    # The API is designed to be "safe" and doesn't reveal information
-    # that wouldn't be available to spectators.
-
-    # Alternative approach: Check scores/items for recent activity
-    # If we can see their items updating, they were recently visible
-
-    # For a basic implementation, we'll need to rely on what data IS available
-    # The 'respawnTimer' field indicates if they're respawning
     respawn_timer = jungler_data.get("respawnTimer", 0)
-    if respawn_timer > 0:
-        return True  # Dead/respawning, not a threat
-
-    # Since direct visibility isn't available, this implementation
-    # shows the jungler info but would need game memory reading
-    # (which could violate ToS) to get true fog-of-war visibility
-
-    # Return False by default to remind player to be cautious
-    return False
+    return is_dead or respawn_timer > 0
 
 
 # ============================================================================
@@ -207,49 +381,26 @@ def is_jungler_visible(jungler_data: Dict[str, Any]) -> bool:
 class JunglerTrackerOverlay:
     """
     A transparent overlay window that displays enemy jungler visibility.
-
-    The overlay consists of a small colored square that changes color
-    based on whether the enemy jungler can be seen:
-    - Green: Jungler is visible (safer to play aggressive)
-    - Red: Jungler is NOT visible (play safe!)
-    - Yellow: Unknown state or error
-    - Gray: No active game detected
     """
 
     def __init__(self):
         """Initialize the overlay window and start the update loop."""
-
         # Create the main window
         self.root = tk.Tk()
-
-        # Remove window decorations (title bar, borders)
         self.root.overrideredirect(True)
-
-        # Make the window stay on top of all other windows
         self.root.attributes("-topmost", True)
-
-        # Set window transparency (1.0 = opaque, 0.0 = fully transparent)
-        # We'll make the background transparent and only show the indicator
         self.root.attributes("-alpha", 0.9)
 
-        # Try to set transparent color (works on some systems)
-        # This makes the specified color completely transparent
         try:
             self.root.attributes("-transparentcolor", "black")
             self.use_transparent_bg = True
         except tk.TclError:
-            # Transparency not supported on this system
             self.use_transparent_bg = False
 
-        # Set the window size
+        # Set window size and position
         self.root.geometry(f"{INDICATOR_SIZE}x{INDICATOR_SIZE}")
+        self.root.geometry(f"+{INDICATOR_PADDING}+{INDICATOR_PADDING}")
 
-        # Position the window in the top-left corner of the screen
-        x_position = INDICATOR_PADDING
-        y_position = INDICATOR_PADDING
-        self.root.geometry(f"+{x_position}+{y_position}")
-
-        # Set background color
         bg_color = "black" if self.use_transparent_bg else COLOR_NO_GAME
         self.root.configure(bg=bg_color)
 
@@ -258,105 +409,97 @@ class JunglerTrackerOverlay:
             self.root,
             width=INDICATOR_SIZE,
             height=INDICATOR_SIZE,
-            highlightthickness=0,  # Remove border
+            highlightthickness=0,
             bg=bg_color
         )
         self.canvas.pack()
 
-        # Draw the initial indicator (gray = no game)
+        # Draw the initial indicator
         self.indicator = self.canvas.create_oval(
-            2, 2,  # Top-left corner with small padding
-            INDICATOR_SIZE - 2, INDICATOR_SIZE - 2,  # Bottom-right corner
+            2, 2,
+            INDICATOR_SIZE - 2, INDICATOR_SIZE - 2,
             fill=COLOR_NO_GAME,
-            outline="#000000",  # Black outline for visibility
+            outline="#000000",
             width=2
         )
 
-        # Store the current state for comparison
+        # State tracking
         self.current_color = COLOR_NO_GAME
-        self.enemy_jungler_name = "Unknown"
+        self.enemy_jungler_name = None
 
-        # Make the window draggable (optional - click and drag to move)
+        # Initialize the minimap detector
+        self.detector = MinimapDetector()
+
+        # Make draggable
         self.canvas.bind("<Button-1>", self._start_drag)
         self.canvas.bind("<B1-Motion>", self._on_drag)
-
-        # Right-click to close the overlay
         self.canvas.bind("<Button-3>", self._close_overlay)
 
         # Start the update loop
         self._update_visibility()
 
-        print("Jungler Tracker Overlay started!")
+        print("\nJungler Tracker Overlay started!")
         print("- Left-click and drag to move the overlay")
         print("- Right-click to close")
         print("- Waiting for game data...")
 
     def _start_drag(self, event):
-        """Record the starting position for dragging."""
         self._drag_start_x = event.x
         self._drag_start_y = event.y
 
     def _on_drag(self, event):
-        """Move the window when dragged."""
         x = self.root.winfo_x() + (event.x - self._drag_start_x)
         y = self.root.winfo_y() + (event.y - self._drag_start_y)
         self.root.geometry(f"+{x}+{y}")
 
     def _close_overlay(self, _event):
-        """Close the overlay window."""
         print("Closing overlay...")
         self.root.destroy()
 
     def _update_indicator(self, color: str):
-        """
-        Update the indicator color if it has changed.
-
-        Args:
-            color: The new color for the indicator.
-        """
         if color != self.current_color:
             self.canvas.itemconfig(self.indicator, fill=color)
             self.current_color = color
 
     def _update_visibility(self):
-        """
-        Fetch game data and update the visibility indicator.
-        This method runs periodically based on POLL_INTERVAL_MS.
-        """
-        # Try to get game data from the API
+        """Check visibility and update the indicator."""
+        # Get game data from API
         game_data = get_game_data()
 
         if game_data is None:
-            # No game running or API not available
             self._update_indicator(COLOR_NO_GAME)
         else:
-            # Game is running, find our team
             my_team = get_active_player_team(game_data)
 
             if my_team is None:
-                # Couldn't determine our team
                 self._update_indicator(COLOR_UNKNOWN)
             else:
-                # Find the enemy jungler
                 enemy_jungler = find_enemy_jungler(game_data, my_team)
 
                 if enemy_jungler is None:
-                    # No enemy jungler found (might be a custom game mode)
                     self._update_indicator(COLOR_UNKNOWN)
                 else:
-                    # Update the stored jungler name
-                    new_name = enemy_jungler.get("championName", "Unknown")
-                    if new_name != self.enemy_jungler_name:
-                        self.enemy_jungler_name = new_name
-                        print(f"Tracking enemy jungler: {self.enemy_jungler_name}")
+                    champion_name = enemy_jungler.get("championName", "Unknown")
 
-                    # Check visibility and update indicator
-                    if is_jungler_visible(enemy_jungler):
+                    # Update champion if changed
+                    if champion_name != self.enemy_jungler_name:
+                        self.enemy_jungler_name = champion_name
+                        print(f"\nTracking enemy jungler: {champion_name}")
+                        self.detector.set_champion(champion_name)
+
+                    # Check if jungler is dead (always show green if dead)
+                    if is_jungler_dead(enemy_jungler):
                         self._update_indicator(COLOR_VISIBLE)
                     else:
-                        self._update_indicator(COLOR_INVISIBLE)
+                        # Check minimap visibility
+                        is_visible, confidence = self.detector.is_champion_visible()
 
-        # Schedule the next update
+                        if is_visible:
+                            self._update_indicator(COLOR_VISIBLE)
+                        else:
+                            self._update_indicator(COLOR_INVISIBLE)
+
+        # Schedule next update
         self.root.after(POLL_INTERVAL_MS, self._update_visibility)
 
     def run(self):
@@ -369,28 +512,29 @@ class JunglerTrackerOverlay:
 # ============================================================================
 
 def main():
-    """
-    Main entry point for the Jungler Tracker Overlay.
-    """
     print("=" * 60)
     print("League of Legends Enemy Jungler Visibility Tracker")
     print("=" * 60)
     print()
-    print("IMPORTANT NOTES:")
-    print("- This overlay is PASSIVE and safe to use")
-    print("- It only reads publicly available game data")
-    print("- No automation or gameplay assistance")
+    print("This overlay uses screen capture to detect if the enemy")
+    print("jungler is visible on your minimap.")
     print()
     print("COLORS:")
-    print(f"  GREEN  = Enemy jungler is visible/dead (safer)")
-    print(f"  RED    = Enemy jungler location unknown (be careful!)")
-    print(f"  YELLOW = Error or unknown state")
-    print(f"  GRAY   = No active game detected")
+    print("  GREEN  = Enemy jungler is visible on minimap (or dead)")
+    print("  RED    = Enemy jungler NOT visible (be careful!)")
+    print("  YELLOW = Error or no enemy jungler found")
+    print("  GRAY   = No active game detected")
     print()
-    print("NOTE: The Riot Live Client API has limitations.")
-    print("It doesn't provide real-time fog-of-war visibility data.")
-    print("The indicator shows RED by default to encourage safe play.")
-    print()
+
+    # Check for required packages
+    try:
+        import mss
+        import cv2
+        import numpy
+    except ImportError as e:
+        print(f"ERROR: Missing required package: {e}")
+        print("Please install requirements: pip install -r requirements.txt")
+        return
 
     # Create and run the overlay
     overlay = JunglerTrackerOverlay()
