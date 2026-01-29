@@ -1,401 +1,395 @@
 #!/usr/bin/env python3
 """
-League of Legends Enemy Jungler Visibility Tracker
-===================================================
-A safe, passive overlay that displays whether the enemy jungler is visible.
-Uses the Riot Live Client API (available during active games).
+League of Legends Predictive Jungler Pathing Helper
+====================================================
+A legal, manual-input overlay for tracking enemy jungle pathing.
+Requires you to press hotkeys when you witness camps being taken.
 
 Features:
-- Green indicator: Enemy jungler is visible on the map
-- Red indicator: Enemy jungler is NOT visible (be careful!)
-- Fully passive - no automated actions, just visual information
-
-Requirements:
-- Python 3.6+
-- requests library (pip install requests)
-- A League of Legends game in progress
+- F1-F6 hotkeys to log camp sightings (Blue, Red, Gromp, Krugs, Raptors, Wolves)
+- Predicts likely pathing based on respawn timers
+- Shows "Danger Level" based on theoretical position
+- Manual input only - no automation
 
 Usage:
-- Run this script while in a League of Legends game
-- A small colored square will appear in the top-right corner
-- The overlay stays on top of all windows
+- Run while in-game
+- When you SEE enemy jungler take a camp, press corresponding F-key
+- Overlay updates predictions
 """
 
 import tkinter as tk
 import requests
 import urllib3
-from typing import Optional, Dict, Any
+import time
+import threading
+from typing import Optional, Dict, List, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
-# Riot Live Client API endpoint (only accessible during an active game)
-API_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
-
-# How often to check the API (in milliseconds)
-# 500ms = 0.5 seconds, provides responsive updates without excessive polling
-POLL_INTERVAL_MS = 500
-
-# Overlay appearance settings
-INDICATOR_SIZE = 40  # Size of the colored square in pixels
-INDICATOR_PADDING = 20  # Distance from screen edges in pixels
-
-# Colors for the visibility indicator
-COLOR_VISIBLE = "#00FF00"  # Bright green - jungler is visible
-COLOR_INVISIBLE = "#FF0000"  # Bright red - jungler is NOT visible
-COLOR_UNKNOWN = "#FFFF00"  # Yellow - waiting for game data or error
-COLOR_NO_GAME = "#808080"  # Gray - no active game detected
-
-# Disable SSL warnings for the local Riot API (uses self-signed certificate)
+# Disable SSL warnings for local API
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Riot Live Client API
+API_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
+POLL_INTERVAL_MS = 1000  # 1 second updates
 
-# ============================================================================
-# RIOT API INTERACTION
-# ============================================================================
+# Camp definitions: (Name, Respawn time in seconds, Position weight)
+CAMPS = {
+    'F1': ("Blue Buff", 300, "Blue Side"),      # 5 minutes
+    'F2': ("Red Buff", 300, "Red Side"),        # 5 minutes  
+    'F3': ("Gromp", 150, "Blue Side"),          # 2.5 minutes
+    'F4': ("Krugs", 150, "Red Side"),           # 2.5 minutes
+    'F5': ("Raptors", 150, "Mid Side"),         # 2.5 minutes
+    'F6': ("Wolves", 150, "Mid Side"),          # 2.5 minutes
+}
 
-def get_game_data() -> Optional[Dict[str, Any]]:
-    """
-    Fetch all game data from the Riot Live Client API.
+COLORS = {
+    'safe': '#00FF00',      # Green - likely far away
+    'caution': '#FFFF00',   # Yellow - could be approaching
+    'danger': '#FF0000',    # Red - likely nearby/ganking
+    'unknown': '#808080',   # Gray - no data
+    'bg': '#1a1a1a',        # Dark background
+    'text': '#ffffff'       # White text
+}
 
-    Returns:
-        Dictionary containing game data if successful, None otherwise.
+@dataclass
+class CampTimer:
+    name: str
+    respawn_at: float
+    side: str
 
-    Note:
-        The API uses HTTPS with a self-signed certificate, so we disable
-        SSL verification. This is safe because it's a local connection.
-    """
-    try:
-        # Make request to the local API with a short timeout
-        # verify=False is required because Riot uses a self-signed certificate
-        response = requests.get(API_URL, timeout=1.0, verify=False)
-
-        # Check if the request was successful
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-
-    except requests.exceptions.ConnectionError:
-        # API not available - game probably not running
-        return None
-    except requests.exceptions.Timeout:
-        # Request timed out
-        return None
-    except requests.exceptions.RequestException:
-        # Any other request error
-        return None
-    except ValueError:
-        # JSON parsing error
-        return None
-
-
-def get_active_player_team(game_data: Dict[str, Any]) -> Optional[str]:
-    """
-    Determine which team the active player (you) is on.
-
-    Args:
-        game_data: The full game data from the API.
-
-    Returns:
-        "ORDER" (blue side) or "CHAOS" (red side), or None if not found.
-    """
-    try:
-        # Get the active player's summoner name
-        active_player_name = game_data.get("activePlayer", {}).get("summonerName")
-
-        if not active_player_name:
-            return None
-
-        # Find the active player in the allPlayers list to get their team
-        for player in game_data.get("allPlayers", []):
-            if player.get("summonerName") == active_player_name:
-                return player.get("team")
-
-        return None
-
-    except (KeyError, TypeError):
-        return None
-
-
-def find_enemy_jungler(game_data: Dict[str, Any], my_team: str) -> Optional[Dict[str, Any]]:
-    """
-    Find the enemy jungler from the player list.
-
-    Args:
-        game_data: The full game data from the API.
-        my_team: The team the active player is on ("ORDER" or "CHAOS").
-
-    Returns:
-        Player data dictionary for the enemy jungler, or None if not found.
-    """
-    try:
-        all_players = game_data.get("allPlayers", [])
-
-        for player in all_players:
-            # Check if this player is on the enemy team
-            player_team = player.get("team")
-            if player_team == my_team:
-                continue  # Skip teammates
-
-            # Check if this player has the JUNGLE position
-            # The position field contains the assigned role
-            position = player.get("position", "").upper()
-
-            if position == "JUNGLE":
-                return player
-
-        return None
-
-    except (KeyError, TypeError):
-        return None
-
-
-def is_jungler_visible(jungler_data: Dict[str, Any]) -> bool:
-    """
-    Check if the enemy jungler is currently visible on the map.
-
-    Args:
-        jungler_data: Player data dictionary for the enemy jungler.
-
-    Returns:
-        True if visible, False otherwise.
-
-    Note:
-        The Riot API provides visibility information that indicates
-        whether a champion can be seen by your team.
-    """
-    # The API doesn't directly expose isVisible in allPlayers
-    # But we can check if the champion is dead or check other indicators
-    # For now, we'll use the 'isDead' status as one indicator
-
-    # Check multiple visibility indicators
-    is_dead = jungler_data.get("isDead", False)
-
-    # If the jungler is dead, they're technically "visible" (in death state)
-    # but not a threat - we'll show as visible (green) since they can't gank
-    if is_dead:
-        return True
-
-    # Unfortunately, the Live Client API doesn't provide real-time
-    # fog of war visibility data for enemy champions in the allPlayers endpoint.
-    # The API is designed to be "safe" and doesn't reveal information
-    # that wouldn't be available to spectators.
-
-    # Alternative approach: Check scores/items for recent activity
-    # If we can see their items updating, they were recently visible
-
-    # For a basic implementation, we'll need to rely on what data IS available
-    # The 'respawnTimer' field indicates if they're respawning
-    respawn_timer = jungler_data.get("respawnTimer", 0)
-    if respawn_timer > 0:
-        return True  # Dead/respawning, not a threat
-
-    # Since direct visibility isn't available, this implementation
-    # shows the jungler info but would need game memory reading
-    # (which could violate ToS) to get true fog-of-war visibility
-
-    # Return False by default to remind player to be cautious
-    return False
-
-
-# ============================================================================
-# OVERLAY GUI
-# ============================================================================
-
-class JunglerTrackerOverlay:
-    """
-    A transparent overlay window that displays enemy jungler visibility.
-
-    The overlay consists of a small colored square that changes color
-    based on whether the enemy jungler can be seen:
-    - Green: Jungler is visible (safer to play aggressive)
-    - Red: Jungler is NOT visible (play safe!)
-    - Yellow: Unknown state or error
-    - Gray: No active game detected
-    """
-
+class JunglerPathingHelper:
     def __init__(self):
-        """Initialize the overlay window and start the update loop."""
-
-        # Create the main window
         self.root = tk.Tk()
-
-        # Remove window decorations (title bar, borders)
-        self.root.overrideredirect(True)
-
-        # Make the window stay on top of all other windows
-        self.root.attributes("-topmost", True)
-
-        # Set window transparency (1.0 = opaque, 0.0 = fully transparent)
-        # We'll make the background transparent and only show the indicator
-        self.root.attributes("-alpha", 0.9)
-
-        # Try to set transparent color (works on some systems)
-        # This makes the specified color completely transparent
-        try:
-            self.root.attributes("-transparentcolor", "black")
-            self.use_transparent_bg = True
-        except tk.TclError:
-            # Transparency not supported on this system
-            self.use_transparent_bg = False
-
-        # Set the window size
-        self.root.geometry(f"{INDICATOR_SIZE}x{INDICATOR_SIZE}")
-
-        # Position the window in the top-left corner of the screen
-        x_position = INDICATOR_PADDING
-        y_position = INDICATOR_PADDING
-        self.root.geometry(f"+{x_position}+{y_position}")
-
-        # Set background color
-        bg_color = "black" if self.use_transparent_bg else COLOR_NO_GAME
-        self.root.configure(bg=bg_color)
-
-        # Create the indicator canvas
-        self.canvas = tk.Canvas(
+        self.root.title("Jungle Pathing Helper")
+        self.root.geometry("350x400")
+        self.root.configure(bg=COLORS['bg'])
+        self.root.attributes('-topmost', True)
+        self.root.attributes('-alpha', 0.95)
+        
+        # Position top-right
+        screen_width = self.root.winfo_screenwidth()
+        self.root.geometry(f"+{screen_width - 370}+50")
+        
+        self.camp_timers: Dict[str, CampTimer] = {}
+        self.enemy_jungler = None
+        self.my_position = "BOT"  # Assume bot lane, user can change
+        self.last_prediction = "Waiting for data..."
+        
+        self.setup_ui()
+        self.setup_hotkeys()
+        
+        # Start API polling
+        self.update_game_data()
+        
+    def setup_ui(self):
+        """Create the overlay interface."""
+        # Header
+        header = tk.Label(
+            self.root, 
+            text="🎯 Jungler Pathing Helper", 
+            font=('Helvetica', 14, 'bold'),
+            bg=COLORS['bg'], 
+            fg=COLORS['text']
+        )
+        header.pack(pady=10)
+        
+        # Instructions
+        instr = tk.Label(
             self.root,
-            width=INDICATOR_SIZE,
-            height=INDICATOR_SIZE,
-            highlightthickness=0,  # Remove border
-            bg=bg_color
+            text="Press F1-F6 when you SEE camps taken\nF1=Blue F2=Red F3=Gromp F4=Krugs F5=Raptors F6=Wolves",
+            font=('Helvetica', 9),
+            bg=COLORS['bg'],
+            fg='#aaaaaa',
+            justify=tk.LEFT
         )
-        self.canvas.pack()
-
-        # Draw the initial indicator (gray = no game)
-        self.indicator = self.canvas.create_oval(
-            2, 2,  # Top-left corner with small padding
-            INDICATOR_SIZE - 2, INDICATOR_SIZE - 2,  # Bottom-right corner
-            fill=COLOR_NO_GAME,
-            outline="#000000",  # Black outline for visibility
-            width=2
+        instr.pack(pady=5)
+        
+        # Status Frame
+        self.status_frame = tk.Frame(self.root, bg=COLORS['bg'])
+        self.status_frame.pack(pady=10, fill=tk.X, padx=10)
+        
+        self.status_label = tk.Label(
+            self.status_frame,
+            text="Status: Unknown",
+            font=('Helvetica', 12, 'bold'),
+            bg=COLORS['unknown'],
+            fg='white',
+            width=20,
+            height=2
         )
-
-        # Store the current state for comparison
-        self.current_color = COLOR_NO_GAME
-        self.enemy_jungler_name = "Unknown"
-
-        # Make the window draggable (optional - click and drag to move)
-        self.canvas.bind("<Button-1>", self._start_drag)
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-
-        # Right-click to close the overlay
-        self.canvas.bind("<Button-3>", self._close_overlay)
-
-        # Start the update loop
-        self._update_visibility()
-
-        print("Jungler Tracker Overlay started!")
-        print("- Left-click and drag to move the overlay")
-        print("- Right-click to close")
-        print("- Waiting for game data...")
-
-    def _start_drag(self, event):
-        """Record the starting position for dragging."""
-        self._drag_start_x = event.x
-        self._drag_start_y = event.y
-
-    def _on_drag(self, event):
-        """Move the window when dragged."""
-        x = self.root.winfo_x() + (event.x - self._drag_start_x)
-        y = self.root.winfo_y() + (event.y - self._drag_start_y)
-        self.root.geometry(f"+{x}+{y}")
-
-    def _close_overlay(self, _event):
-        """Close the overlay window."""
-        print("Closing overlay...")
-        self.root.destroy()
-
-    def _update_indicator(self, color: str):
+        self.status_label.pack()
+        
+        # Prediction Text
+        self.prediction_label = tk.Label(
+            self.root,
+            text="No camp data yet.\nWatch enemy jungler and log camps!",
+            font=('Helvetica', 10),
+            bg=COLORS['bg'],
+            fg=COLORS['text'],
+            wraplength=300,
+            justify=tk.LEFT
+        )
+        self.prediction_label.pack(pady=10)
+        
+        # Camp Timers List
+        self.timers_text = tk.Text(
+            self.root,
+            height=10,
+            width=40,
+            bg='#2a2a2a',
+            fg=COLORS['text'],
+            font=('Courier', 9),
+            state=tk.DISABLED
+        )
+        self.timers_text.pack(pady=10, padx=10)
+        
+        # Lane selector
+        lane_frame = tk.Frame(self.root, bg=COLORS['bg'])
+        lane_frame.pack(pady=5)
+        tk.Label(lane_frame, text="Your Lane:", bg=COLORS['bg'], fg='white').pack(side=tk.LEFT)
+        self.lane_var = tk.StringVar(value="BOT")
+        for lane in ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]:
+            tk.Radiobutton(
+                lane_frame, 
+                text=lane, 
+                variable=self.lane_var, 
+                value=lane,
+                bg=COLORS['bg'],
+                fg='white',
+                selectcolor=COLORS['bg'],
+                command=self.update_prediction
+            ).pack(side=tk.LEFT)
+        
+        # Buttons
+        btn_frame = tk.Frame(self.root, bg=COLORS['bg'])
+        btn_frame.pack(pady=5)
+        
+        tk.Button(
+            btn_frame,
+            text="Clear All",
+            command=self.clear_timers,
+            bg='#444444',
+            fg='white'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(
+            btn_frame,
+            text="Exit",
+            command=self.root.quit,
+            bg='#444444',
+            fg='white'
+        ).pack(side=tk.LEFT, padx=5)
+        
+    def setup_hotkeys(self):
+        """Set up global hotkeys for camp logging."""
+        for key in CAMPS.keys():
+            self.root.bind(f'<{key}>', lambda e, k=key: self.log_camp(k))
+            
+    def log_camp(self, key: str):
+        """Log that you saw the enemy take a camp."""
+        camp_name, respawn, side = CAMPS[key]
+        current_time = time.time()
+        respawn_time = current_time + respawn
+        
+        self.camp_timers[camp_name] = CampTimer(camp_name, respawn_time, side)
+        self.update_prediction()
+        self.update_timers_display()
+        
+        # Visual feedback
+        self.flash_status(f"Logged: {camp_name}", COLORS['safe'])
+        
+    def flash_status(self, text, color):
+        """Flash a temporary status message."""
+        original_text = self.status_label.cget("text")
+        original_bg = self.status_label.cget("bg")
+        
+        self.status_label.config(text=text, bg=color)
+        self.root.after(1000, lambda: self.status_label.config(text=original_text, bg=original_bg))
+        
+    def clear_timers(self):
+        """Clear all camp timers."""
+        self.camp_timers.clear()
+        self.update_prediction()
+        self.update_timers_display()
+        
+    def get_game_data(self) -> Optional[Dict]:
+        """Fetch game data from Live Client API."""
+        try:
+            response = requests.get(API_URL, timeout=2, verify=False)
+            if response.status_code == 200:
+                return response.json()
+        except:
+            pass
+        return None
+        
+    def update_game_data(self):
+        """Poll game data to identify enemy jungler."""
+        data = self.get_game_data()
+        if data:
+            # Find enemy jungler
+            my_team = None
+            for player in data.get('allPlayers', []):
+                if player.get('summonerName') == data.get('activePlayer', {}).get('summonerName'):
+                    my_team = player.get('team')
+                    break
+                    
+            if my_team:
+                for player in data.get('allPlayers', []):
+                    if player.get('team') != my_team and player.get('position') == 'JUNGLE':
+                        if self.enemy_jungler != player.get('championName'):
+                            self.enemy_jungler = player.get('championName')
+                            self.prediction_label.config(
+                                text=f"Tracking: {self.enemy_jungler}\nWaiting for camp data..."
+                            )
+        
+        # Schedule next update
+        self.root.after(POLL_INTERVAL_MS, self.update_game_data)
+        
+    def analyze_pathing(self) -> Tuple[str, str, str]:
         """
-        Update the indicator color if it has changed.
-
-        Args:
-            color: The new color for the indicator.
+        Analyze camp timers to predict pathing.
+        Returns: (danger_level, prediction_text, color)
         """
-        if color != self.current_color:
-            self.canvas.itemconfig(self.indicator, fill=color)
-            self.current_color = color
-
-    def _update_visibility(self):
-        """
-        Fetch game data and update the visibility indicator.
-        This method runs periodically based on POLL_INTERVAL_MS.
-        """
-        # Try to get game data from the API
-        game_data = get_game_data()
-
-        if game_data is None:
-            # No game running or API not available
-            self._update_indicator(COLOR_NO_GAME)
-        else:
-            # Game is running, find our team
-            my_team = get_active_player_team(game_data)
-
-            if my_team is None:
-                # Couldn't determine our team
-                self._update_indicator(COLOR_UNKNOWN)
+        if not self.camp_timers:
+            return "unknown", "No data. Watch enemy jungler and press F1-F6 when you see camps taken.", COLORS['unknown']
+            
+        current_time = time.time()
+        my_lane = self.lane_var.get()
+        
+        # Find upcoming respawns (next 60 seconds)
+        upcoming = []
+        recently_taken = []  # Taken in last 30 seconds
+        
+        for camp_name, timer in self.camp_timers.items():
+            time_until = timer.respawn_at - current_time
+            time_since_taken = current_time - (timer.respawn_at - self.get_camp_respawn(camp_name))
+            
+            if 0 < time_until < 60:
+                upcoming.append((camp_name, time_until, timer.side))
+            elif time_since_taken < 30:
+                recently_taken.append((camp_name, timer.side))
+                
+        # Logic for predictions
+        danger_level = "safe"
+        prediction = ""
+        
+        # If camps were taken recently on our side -> DANGER
+        for camp, side in recently_taken:
+            if self.is_my_side(side, my_lane):
+                danger_level = "danger"
+                prediction = f"⚠️ DANGER: Just took {camp} on {side}! Likely ganking {my_lane} now or clearing toward you."
+                break
+                
+        # If camps respawning soon on our side -> CAUTION
+        if danger_level == "safe" and upcoming:
+            for camp, time_left, side in upcoming:
+                if self.is_my_side(side, my_lane):
+                    danger_level = "caution"
+                    prediction = f"⚡ CAUTION: {camp} respawns in {int(time_left)}s on {side}. May path here soon."
+                    break
+                    
+        # If no threats detected
+        if danger_level == "safe":
+            if upcoming:
+                camps_str = ", ".join([f"{c} ({int(t)}s)" for c, t, s in upcoming[:2]])
+                prediction = f"✅ SAFE: Enemy likely farming {camps_str}. Good time to trade/push."
+            elif recently_taken:
+                last_camp = recently_taken[-1][0]
+                prediction = f"✅ SAFE: Last seen at {last_camp}. Likely on opposite side or backed."
             else:
-                # Find the enemy jungler
-                enemy_jungler = find_enemy_jungler(game_data, my_team)
-
-                if enemy_jungler is None:
-                    # No enemy jungler found (might be a custom game mode)
-                    self._update_indicator(COLOR_UNKNOWN)
+                prediction = "No immediate threats detected. Enemy jungle location unknown."
+                
+        return danger_level, prediction, COLORS[danger_level]
+        
+    def get_camp_respawn(self, camp_name: str) -> int:
+        """Get respawn time for a camp."""
+        for key, (name, respawn, side) in CAMPS.items():
+            if name == camp_name:
+                return respawn
+        return 150
+        
+    def is_my_side(self, camp_side: str, my_lane: str) -> bool:
+        """Determine if a camp side is dangerous for my lane."""
+        lane_sides = {
+            "TOP": ["Blue Side", "Mid Side"],      # Blue buff/Gromp side
+            "MID": ["Mid Side"],                    # Center
+            "BOT": ["Red Side", "Mid Side"],       # Red buff/Krugs side
+            "SUPPORT": ["Red Side", "Mid Side"],
+            "JUNGLE": ["Blue Side", "Red Side", "Mid Side"]
+        }
+        return camp_side in lane_sides.get(my_lane, [])
+        
+    def update_prediction(self):
+        """Update the prediction display."""
+        danger, prediction, color = self.analyze_pathing()
+        self.last_prediction = prediction
+        
+        self.status_label.config(
+            text=f"Status: {danger.upper()}",
+            bg=color
+        )
+        self.prediction_label.config(text=prediction)
+        self.update_timers_display()
+        
+    def update_timers_display(self):
+        """Update the camp timers list."""
+        self.timers_text.config(state=tk.NORMAL)
+        self.timers_text.delete(1.0, tk.END)
+        
+        current_time = time.time()
+        
+        if not self.camp_timers:
+            self.timers_text.insert(tk.END, "No camps logged yet.\n")
+            self.timers_text.insert(tk.END, "Press F1-F6 when you see camps taken.\n\n")
+            self.timers_text.insert(tk.END, "F1: Blue Buff    F2: Red Buff\n")
+            self.timers_text.insert(tk.END, "F3: Gromp        F4: Krugs\n")
+            self.timers_text.insert(tk.END, "F5: Raptors      F6: Wolves\n")
+        else:
+            # Sort by respawn time
+            sorted_camps = sorted(
+                self.camp_timers.items(),
+                key=lambda x: x[1].respawn_at
+            )
+            
+            self.timers_text.insert(tk.END, "Camp Timers:\n")
+            self.timers_text.insert(tk.END, "-" * 30 + "\n")
+            
+            for camp_name, timer in sorted_camps:
+                time_left = timer.respawn_at - current_time
+                if time_left > 0:
+                    minutes = int(time_left // 60)
+                    seconds = int(time_left % 60)
+                    status = f"{minutes}:{seconds:02d}"
                 else:
-                    # Update the stored jungler name
-                    new_name = enemy_jungler.get("championName", "Unknown")
-                    if new_name != self.enemy_jungler_name:
-                        self.enemy_jungler_name = new_name
-                        print(f"Tracking enemy jungler: {self.enemy_jungler_name}")
-
-                    # Check visibility and update indicator
-                    if is_jungler_visible(enemy_jungler):
-                        self._update_indicator(COLOR_VISIBLE)
-                    else:
-                        self._update_indicator(COLOR_INVISIBLE)
-
-        # Schedule the next update
-        self.root.after(POLL_INTERVAL_MS, self._update_visibility)
-
-    def run(self):
-        """Start the overlay main loop."""
-        self.root.mainloop()
-
-
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
+                    status = "READY"
+                    
+                side_short = timer.side.replace(" Side", "")[0]
+                self.timers_text.insert(tk.END, f"{camp_name:<12} [{side_short}] {status:>6}\n")
+                
+        self.timers_text.config(state=tk.DISABLED)
+        
+        # Auto-refresh every second
+        self.root.after(1000, self.update_timers_display)
 
 def main():
-    """
-    Main entry point for the Jungler Tracker Overlay.
-    """
     print("=" * 60)
-    print("League of Legends Enemy Jungler Visibility Tracker")
+    print("Jungler Pathing Helper - MANUAL INPUT VERSION")
     print("=" * 60)
-    print()
-    print("IMPORTANT NOTES:")
-    print("- This overlay is PASSIVE and safe to use")
-    print("- It only reads publicly available game data")
-    print("- No automation or gameplay assistance")
-    print()
-    print("COLORS:")
-    print(f"  GREEN  = Enemy jungler is visible/dead (safer)")
-    print(f"  RED    = Enemy jungler location unknown (be careful!)")
-    print(f"  YELLOW = Error or unknown state")
-    print(f"  GRAY   = No active game detected")
-    print()
-    print("NOTE: The Riot Live Client API has limitations.")
-    print("It doesn't provide real-time fog-of-war visibility data.")
-    print("The indicator shows RED by default to encourage safe play.")
-    print()
-
-    # Create and run the overlay
-    overlay = JunglerTrackerOverlay()
-    overlay.run()
-
+    print("\n⚠️  IMPORTANT - READ THIS:")
+    print("This tool requires MANUAL input. You MUST press F1-F6")
+    print("when you visually see the enemy jungler take a camp.")
+    print("\nHOTKEYS:")
+    for key, (name, _, side) in CAMPS.items():
+        print(f"  {key}: {name} ({side})")
+    print("\nThis tool is LEGAL because:")
+    print("  ✅ You provide all inputs manually")
+    print("  ✅ It only tracks information you witnessed")
+    print("  ✅ No automation or memory reading")
+    print("\nStarting overlay...")
+    
+    app = JunglerPathingHelper()
+    app.root.mainloop()
 
 if __name__ == "__main__":
     main()
