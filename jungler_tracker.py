@@ -1,395 +1,545 @@
 #!/usr/bin/env python3
 """
-League of Legends Predictive Jungler Pathing Helper
-====================================================
-A legal, manual-input overlay for tracking enemy jungle pathing.
-Requires you to press hotkeys when you witness camps being taken.
+League of Legends Enemy Jungler Visibility Tracker
+===================================================
+A safe, passive overlay that displays whether the enemy jungler is visible
+on the minimap using screen capture and image recognition.
 
 Features:
-- F1-F6 hotkeys to log camp sightings (Blue, Red, Gromp, Krugs, Raptors, Wolves)
-- Predicts likely pathing based on respawn timers
-- Shows "Danger Level" based on theoretical position
-- Manual input only - no automation
+- Green indicator: Enemy jungler is visible on the minimap
+- Red indicator: Enemy jungler is NOT visible (be careful!)
+- Works with any screen resolution
+- Fully passive - no automated actions, just visual information
+
+Requirements:
+- Python 3.6+
+- mss, opencv-python, numpy, Pillow, requests
+- A League of Legends game in progress
 
 Usage:
-- Run while in-game
-- When you SEE enemy jungler take a camp, press corresponding F-key
-- Overlay updates predictions
+- Run this script while in a League of Legends game
+- A small colored circle will appear in the top-left corner
+- The overlay stays on top of all windows
 """
 
 import tkinter as tk
 import requests
 import urllib3
+import os
+import io
 import time
-import threading
-from typing import Optional, Dict, List, Tuple
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, Tuple
+from pathlib import Path
 
-# Disable SSL warnings for local API
+import mss
+import cv2
+import numpy as np
+from PIL import Image
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Riot Live Client API endpoint (only accessible during an active game)
+API_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
+
+# Data Dragon base URL for champion images
+DDRAGON_VERSION_URL = "https://ddragon.leagueoflegends.com/api/versions.json"
+DDRAGON_CHAMPION_URL = "https://ddragon.leagueoflegends.com/cdn/{version}/img/champion/{champion}.png"
+
+# How often to check visibility (in milliseconds)
+POLL_INTERVAL_MS = 200  # 200ms = 5 checks per second for responsive updates
+
+# Overlay appearance settings
+INDICATOR_SIZE = 40  # Size of the colored circle in pixels
+INDICATOR_PADDING = 20  # Distance from screen edges in pixels
+
+# Colors for the visibility indicator
+COLOR_VISIBLE = "#00FF00"  # Bright green - jungler is visible
+COLOR_INVISIBLE = "#FF0000"  # Bright red - jungler is NOT visible
+COLOR_UNKNOWN = "#FFFF00"  # Yellow - waiting for game data or error
+COLOR_NO_GAME = "#808080"  # Gray - no active game detected
+
+# Minimap detection settings
+# The minimap is in the bottom-right corner of the screen
+# These ratios work for standard LoL UI at any resolution
+MINIMAP_RATIO_WIDTH = 0.1425  # Minimap width as ratio of screen width
+MINIMAP_RATIO_HEIGHT = 0.253  # Minimap height as ratio of screen height
+MINIMAP_PADDING_RIGHT = 0  # Padding from right edge
+MINIMAP_PADDING_BOTTOM = 0  # Padding from bottom edge
+
+# Template matching threshold (0.0 to 1.0, higher = stricter matching)
+MATCH_THRESHOLD = 0.55  # Lowered for better detection
+
+# Champion icon size on minimap (ratio of minimap size)
+ICON_SIZE_RATIO = 0.12  # Champion icons are about 12% of minimap size
+
+# Cache directory for champion icons
+CACHE_DIR = Path(__file__).parent / "champion_icons"
+
+# Disable SSL warnings for the local Riot API
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Riot Live Client API
-API_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
-POLL_INTERVAL_MS = 1000  # 1 second updates
 
-# Camp definitions: (Name, Respawn time in seconds, Position weight)
-CAMPS = {
-    'F1': ("Blue Buff", 300, "Blue Side"),      # 5 minutes
-    'F2': ("Red Buff", 300, "Red Side"),        # 5 minutes  
-    'F3': ("Gromp", 150, "Blue Side"),          # 2.5 minutes
-    'F4': ("Krugs", 150, "Red Side"),           # 2.5 minutes
-    'F5': ("Raptors", 150, "Mid Side"),         # 2.5 minutes
-    'F6': ("Wolves", 150, "Mid Side"),          # 2.5 minutes
-}
+# ============================================================================
+# DATA DRAGON / CHAMPION ICONS
+# ============================================================================
 
-COLORS = {
-    'safe': '#00FF00',      # Green - likely far away
-    'caution': '#FFFF00',   # Yellow - could be approaching
-    'danger': '#FF0000',    # Red - likely nearby/ganking
-    'unknown': '#808080',   # Gray - no data
-    'bg': '#1a1a1a',        # Dark background
-    'text': '#ffffff'       # White text
-}
+def get_latest_ddragon_version() -> Optional[str]:
+    """Get the latest Data Dragon version."""
+    try:
+        response = requests.get(DDRAGON_VERSION_URL, timeout=5.0)
+        if response.status_code == 200:
+            versions = response.json()
+            return versions[0] if versions else None
+    except Exception:
+        pass
+    return None
 
-@dataclass
-class CampTimer:
-    name: str
-    respawn_at: float
-    side: str
 
-class JunglerPathingHelper:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Jungle Pathing Helper")
-        self.root.geometry("350x400")
-        self.root.configure(bg=COLORS['bg'])
-        self.root.attributes('-topmost', True)
-        self.root.attributes('-alpha', 0.95)
-        
-        # Position top-right
-        screen_width = self.root.winfo_screenwidth()
-        self.root.geometry(f"+{screen_width - 370}+50")
-        
-        self.camp_timers: Dict[str, CampTimer] = {}
-        self.enemy_jungler = None
-        self.my_position = "BOT"  # Assume bot lane, user can change
-        self.last_prediction = "Waiting for data..."
-        
-        self.setup_ui()
-        self.setup_hotkeys()
-        
-        # Start API polling
-        self.update_game_data()
-        
-    def setup_ui(self):
-        """Create the overlay interface."""
-        # Header
-        header = tk.Label(
-            self.root, 
-            text="🎯 Jungler Pathing Helper", 
-            font=('Helvetica', 14, 'bold'),
-            bg=COLORS['bg'], 
-            fg=COLORS['text']
-        )
-        header.pack(pady=10)
-        
-        # Instructions
-        instr = tk.Label(
-            self.root,
-            text="Press F1-F6 when you SEE camps taken\nF1=Blue F2=Red F3=Gromp F4=Krugs F5=Raptors F6=Wolves",
-            font=('Helvetica', 9),
-            bg=COLORS['bg'],
-            fg='#aaaaaa',
-            justify=tk.LEFT
-        )
-        instr.pack(pady=5)
-        
-        # Status Frame
-        self.status_frame = tk.Frame(self.root, bg=COLORS['bg'])
-        self.status_frame.pack(pady=10, fill=tk.X, padx=10)
-        
-        self.status_label = tk.Label(
-            self.status_frame,
-            text="Status: Unknown",
-            font=('Helvetica', 12, 'bold'),
-            bg=COLORS['unknown'],
-            fg='white',
-            width=20,
-            height=2
-        )
-        self.status_label.pack()
-        
-        # Prediction Text
-        self.prediction_label = tk.Label(
-            self.root,
-            text="No camp data yet.\nWatch enemy jungler and log camps!",
-            font=('Helvetica', 10),
-            bg=COLORS['bg'],
-            fg=COLORS['text'],
-            wraplength=300,
-            justify=tk.LEFT
-        )
-        self.prediction_label.pack(pady=10)
-        
-        # Camp Timers List
-        self.timers_text = tk.Text(
-            self.root,
-            height=10,
-            width=40,
-            bg='#2a2a2a',
-            fg=COLORS['text'],
-            font=('Courier', 9),
-            state=tk.DISABLED
-        )
-        self.timers_text.pack(pady=10, padx=10)
-        
-        # Lane selector
-        lane_frame = tk.Frame(self.root, bg=COLORS['bg'])
-        lane_frame.pack(pady=5)
-        tk.Label(lane_frame, text="Your Lane:", bg=COLORS['bg'], fg='white').pack(side=tk.LEFT)
-        self.lane_var = tk.StringVar(value="BOT")
-        for lane in ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]:
-            tk.Radiobutton(
-                lane_frame, 
-                text=lane, 
-                variable=self.lane_var, 
-                value=lane,
-                bg=COLORS['bg'],
-                fg='white',
-                selectcolor=COLORS['bg'],
-                command=self.update_prediction
-            ).pack(side=tk.LEFT)
-        
-        # Buttons
-        btn_frame = tk.Frame(self.root, bg=COLORS['bg'])
-        btn_frame.pack(pady=5)
-        
-        tk.Button(
-            btn_frame,
-            text="Clear All",
-            command=self.clear_timers,
-            bg='#444444',
-            fg='white'
-        ).pack(side=tk.LEFT, padx=5)
-        
-        tk.Button(
-            btn_frame,
-            text="Exit",
-            command=self.root.quit,
-            bg='#444444',
-            fg='white'
-        ).pack(side=tk.LEFT, padx=5)
-        
-    def setup_hotkeys(self):
-        """Set up global hotkeys for camp logging."""
-        for key in CAMPS.keys():
-            self.root.bind(f'<{key}>', lambda e, k=key: self.log_camp(k))
-            
-    def log_camp(self, key: str):
-        """Log that you saw the enemy take a camp."""
-        camp_name, respawn, side = CAMPS[key]
-        current_time = time.time()
-        respawn_time = current_time + respawn
-        
-        self.camp_timers[camp_name] = CampTimer(camp_name, respawn_time, side)
-        self.update_prediction()
-        self.update_timers_display()
-        
-        # Visual feedback
-        self.flash_status(f"Logged: {camp_name}", COLORS['safe'])
-        
-    def flash_status(self, text, color):
-        """Flash a temporary status message."""
-        original_text = self.status_label.cget("text")
-        original_bg = self.status_label.cget("bg")
-        
-        self.status_label.config(text=text, bg=color)
-        self.root.after(1000, lambda: self.status_label.config(text=original_text, bg=original_bg))
-        
-    def clear_timers(self):
-        """Clear all camp timers."""
-        self.camp_timers.clear()
-        self.update_prediction()
-        self.update_timers_display()
-        
-    def get_game_data(self) -> Optional[Dict]:
-        """Fetch game data from Live Client API."""
-        try:
-            response = requests.get(API_URL, timeout=2, verify=False)
-            if response.status_code == 200:
-                return response.json()
-        except:
-            pass
+def download_champion_icon(champion_name: str, version: str) -> Optional[np.ndarray]:
+    """
+    Download a champion's square icon from Data Dragon.
+
+    Returns the icon as an OpenCV image (BGR format).
+    """
+    # Normalize champion name for URL (handle special cases)
+    url_name = champion_name.replace(" ", "").replace("'", "")
+
+    # Special cases for champion names that differ in Data Dragon
+    name_mappings = {
+        "Wukong": "MonkeyKing",
+        "Cho'Gath": "Chogath",
+        "Kha'Zix": "Khazix",
+        "Kai'Sa": "Kaisa",
+        "Bel'Veth": "Belveth",
+        "Vel'Koz": "Velkoz",
+        "Rek'Sai": "RekSai",
+        "Kog'Maw": "KogMaw",
+        "LeBlanc": "Leblanc",
+        "Nunu & Willump": "Nunu",
+    }
+
+    if champion_name in name_mappings:
+        url_name = name_mappings[champion_name]
+
+    url = DDRAGON_CHAMPION_URL.format(version=version, champion=url_name)
+
+    try:
+        response = requests.get(url, timeout=5.0)
+        if response.status_code == 200:
+            # Convert to OpenCV format
+            image_data = io.BytesIO(response.content)
+            pil_image = Image.open(image_data).convert("RGB")
+            cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            return cv_image
+    except Exception as e:
+        print(f"Failed to download icon for {champion_name}: {e}")
+
+    return None
+
+
+def get_champion_icon(champion_name: str) -> Optional[np.ndarray]:
+    """
+    Get a champion icon, using cache if available.
+
+    Returns the icon as an OpenCV image (BGR format).
+    """
+    # Create cache directory if it doesn't exist
+    CACHE_DIR.mkdir(exist_ok=True)
+
+    # Check cache first
+    cache_file = CACHE_DIR / f"{champion_name}.png"
+
+    if cache_file.exists():
+        img = cv2.imread(str(cache_file))
+        if img is not None:
+            return img
+
+    # Download from Data Dragon
+    version = get_latest_ddragon_version()
+    if version is None:
+        print("Could not get Data Dragon version")
         return None
-        
-    def update_game_data(self):
-        """Poll game data to identify enemy jungler."""
-        data = self.get_game_data()
-        if data:
-            # Find enemy jungler
-            my_team = None
-            for player in data.get('allPlayers', []):
-                if player.get('summonerName') == data.get('activePlayer', {}).get('summonerName'):
-                    my_team = player.get('team')
-                    break
-                    
-            if my_team:
-                for player in data.get('allPlayers', []):
-                    if player.get('team') != my_team and player.get('position') == 'JUNGLE':
-                        if self.enemy_jungler != player.get('championName'):
-                            self.enemy_jungler = player.get('championName')
-                            self.prediction_label.config(
-                                text=f"Tracking: {self.enemy_jungler}\nWaiting for camp data..."
-                            )
-        
-        # Schedule next update
-        self.root.after(POLL_INTERVAL_MS, self.update_game_data)
-        
-    def analyze_pathing(self) -> Tuple[str, str, str]:
+
+    icon = download_champion_icon(champion_name, version)
+
+    if icon is not None:
+        # Cache the icon
+        cv2.imwrite(str(cache_file), icon)
+        return icon
+
+    return None
+
+
+# ============================================================================
+# MINIMAP DETECTION
+# ============================================================================
+
+class MinimapDetector:
+    """
+    Detects the minimap region and searches for champion icons on it.
+    """
+
+    def __init__(self):
+        self.sct = mss.mss()
+        self._update_screen_info()
+        self.champion_template = None
+        self.champion_name = None
+        # Keep multiple scaled templates for better matching
+        self.scaled_templates = []
+
+    def _update_screen_info(self):
+        """Update screen dimensions and minimap region."""
+        # Get primary monitor info
+        monitor = self.sct.monitors[1]  # monitors[0] is all monitors combined
+        self.screen_width = monitor["width"]
+        self.screen_height = monitor["height"]
+
+        # Calculate minimap region based on screen size
+        # The minimap is in the bottom-right corner
+        minimap_width = int(self.screen_width * MINIMAP_RATIO_WIDTH)
+        minimap_height = int(self.screen_height * MINIMAP_RATIO_HEIGHT)
+
+        # Minimap position
+        self.minimap_left = self.screen_width - minimap_width - MINIMAP_PADDING_RIGHT
+        self.minimap_top = self.screen_height - minimap_height - MINIMAP_PADDING_BOTTOM
+        self.minimap_width = minimap_width
+        self.minimap_height = minimap_height
+
+        # Calculate expected icon size on minimap
+        self.icon_size = int(min(minimap_width, minimap_height) * ICON_SIZE_RATIO)
+
+        print(f"Screen: {self.screen_width}x{self.screen_height}")
+        print(f"Minimap region: ({self.minimap_left}, {self.minimap_top}) - {minimap_width}x{minimap_height}")
+        print(f"Expected icon size: {self.icon_size}px")
+
+    def set_champion(self, champion_name: str) -> bool:
         """
-        Analyze camp timers to predict pathing.
-        Returns: (danger_level, prediction_text, color)
+        Set the champion to search for on the minimap.
+
+        Returns True if the champion icon was loaded successfully.
         """
-        if not self.camp_timers:
-            return "unknown", "No data. Watch enemy jungler and press F1-F6 when you see camps taken.", COLORS['unknown']
-            
-        current_time = time.time()
-        my_lane = self.lane_var.get()
-        
-        # Find upcoming respawns (next 60 seconds)
-        upcoming = []
-        recently_taken = []  # Taken in last 30 seconds
-        
-        for camp_name, timer in self.camp_timers.items():
-            time_until = timer.respawn_at - current_time
-            time_since_taken = current_time - (timer.respawn_at - self.get_camp_respawn(camp_name))
-            
-            if 0 < time_until < 60:
-                upcoming.append((camp_name, time_until, timer.side))
-            elif time_since_taken < 30:
-                recently_taken.append((camp_name, timer.side))
-                
-        # Logic for predictions
-        danger_level = "safe"
-        prediction = ""
-        
-        # If camps were taken recently on our side -> DANGER
-        for camp, side in recently_taken:
-            if self.is_my_side(side, my_lane):
-                danger_level = "danger"
-                prediction = f"⚠️ DANGER: Just took {camp} on {side}! Likely ganking {my_lane} now or clearing toward you."
-                break
-                
-        # If camps respawning soon on our side -> CAUTION
-        if danger_level == "safe" and upcoming:
-            for camp, time_left, side in upcoming:
-                if self.is_my_side(side, my_lane):
-                    danger_level = "caution"
-                    prediction = f"⚡ CAUTION: {camp} respawns in {int(time_left)}s on {side}. May path here soon."
-                    break
-                    
-        # If no threats detected
-        if danger_level == "safe":
-            if upcoming:
-                camps_str = ", ".join([f"{c} ({int(t)}s)" for c, t, s in upcoming[:2]])
-                prediction = f"✅ SAFE: Enemy likely farming {camps_str}. Good time to trade/push."
-            elif recently_taken:
-                last_camp = recently_taken[-1][0]
-                prediction = f"✅ SAFE: Last seen at {last_camp}. Likely on opposite side or backed."
-            else:
-                prediction = "No immediate threats detected. Enemy jungle location unknown."
-                
-        return danger_level, prediction, COLORS[danger_level]
-        
-    def get_camp_respawn(self, camp_name: str) -> int:
-        """Get respawn time for a camp."""
-        for key, (name, respawn, side) in CAMPS.items():
-            if name == camp_name:
-                return respawn
-        return 150
-        
-    def is_my_side(self, camp_side: str, my_lane: str) -> bool:
-        """Determine if a camp side is dangerous for my lane."""
-        lane_sides = {
-            "TOP": ["Blue Side", "Mid Side"],      # Blue buff/Gromp side
-            "MID": ["Mid Side"],                    # Center
-            "BOT": ["Red Side", "Mid Side"],       # Red buff/Krugs side
-            "SUPPORT": ["Red Side", "Mid Side"],
-            "JUNGLE": ["Blue Side", "Red Side", "Mid Side"]
+        if champion_name == self.champion_name and self.champion_template is not None:
+            return True  # Already loaded
+
+        self.champion_name = champion_name
+        icon = get_champion_icon(champion_name)
+
+        if icon is None:
+            print(f"Could not load icon for {champion_name}")
+            self.champion_template = None
+            self.scaled_templates = []
+            return False
+
+        # Create the main template at the expected icon size
+        self.champion_template = self._prepare_template(icon, self.icon_size)
+
+        # Create multiple scaled versions for better matching at different zoom levels
+        self.scaled_templates = []
+        for scale in [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]:
+            size = int(self.icon_size * scale)
+            if size > 5:  # Minimum reasonable size
+                template = self._prepare_template(icon, size)
+                self.scaled_templates.append((scale, template))
+
+        print(f"Loaded icon for {champion_name} ({len(self.scaled_templates)} scale variants)")
+        return True
+
+    def _prepare_template(self, icon: np.ndarray, size: int) -> np.ndarray:
+        """
+        Prepare a champion icon as a template for matching.
+
+        The icon is resized and processed to improve matching accuracy.
+        """
+        # Resize to expected size on minimap
+        template = cv2.resize(icon, (size, size), interpolation=cv2.INTER_AREA)
+
+        # Create a circular mask (minimap icons are circular)
+        mask = np.zeros((size, size), dtype=np.uint8)
+        center = size // 2
+        radius = int(size * 0.45)  # Slightly smaller than half to avoid edges
+        cv2.circle(mask, (center, center), radius, 255, -1)
+
+        # Apply mask to focus on the center of the icon
+        template = cv2.bitwise_and(template, template, mask=mask)
+
+        return template
+
+    def capture_minimap(self) -> np.ndarray:
+        """
+        Capture the minimap region of the screen.
+
+        Returns the minimap as an OpenCV image (BGR format).
+        """
+        # Define the region to capture
+        region = {
+            "left": self.minimap_left,
+            "top": self.minimap_top,
+            "width": self.minimap_width,
+            "height": self.minimap_height
         }
-        return camp_side in lane_sides.get(my_lane, [])
-        
-    def update_prediction(self):
-        """Update the prediction display."""
-        danger, prediction, color = self.analyze_pathing()
-        self.last_prediction = prediction
-        
-        self.status_label.config(
-            text=f"Status: {danger.upper()}",
-            bg=color
+
+        # Capture the region
+        screenshot = self.sct.grab(region)
+
+        # Convert to OpenCV format (mss returns BGRA)
+        img = np.array(screenshot)
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        return img
+
+    def is_champion_visible(self) -> Tuple[bool, float]:
+        """
+        Check if the tracked champion is visible on the minimap.
+
+        Returns a tuple of (is_visible, confidence).
+        """
+        if self.champion_template is None or not self.scaled_templates:
+            return False, 0.0
+
+        # Capture the minimap
+        minimap = self.capture_minimap()
+
+        # Try matching with each scaled template
+        best_confidence = 0.0
+
+        for scale, template in self.scaled_templates:
+            # Skip if template is larger than minimap
+            if template.shape[0] > minimap.shape[0] or template.shape[1] > minimap.shape[1]:
+                continue
+
+            # Perform template matching
+            result = cv2.matchTemplate(minimap, template, cv2.TM_CCOEFF_NORMED)
+
+            # Get the best match
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+            if max_val > best_confidence:
+                best_confidence = max_val
+
+        # Check if the best match exceeds our threshold
+        is_visible = best_confidence >= MATCH_THRESHOLD
+
+        return is_visible, best_confidence
+
+
+# ============================================================================
+# RIOT API INTERACTION
+# ============================================================================
+
+def get_game_data() -> Optional[Dict[str, Any]]:
+    """Fetch all game data from the Riot Live Client API."""
+    try:
+        response = requests.get(API_URL, timeout=1.0, verify=False)
+        if response.status_code == 200:
+            return response.json()
+    except Exception:
+        pass
+    return None
+
+
+def get_active_player_team(game_data: Dict[str, Any]) -> Optional[str]:
+    """Determine which team the active player is on."""
+    try:
+        active_player_name = game_data.get("activePlayer", {}).get("summonerName")
+        if not active_player_name:
+            return None
+
+        for player in game_data.get("allPlayers", []):
+            if player.get("summonerName") == active_player_name:
+                return player.get("team")
+    except (KeyError, TypeError):
+        pass
+    return None
+
+
+def find_enemy_jungler(game_data: Dict[str, Any], my_team: str) -> Optional[Dict[str, Any]]:
+    """Find the enemy jungler from the player list."""
+    try:
+        for player in game_data.get("allPlayers", []):
+            if player.get("team") == my_team:
+                continue
+            if player.get("position", "").upper() == "JUNGLE":
+                return player
+    except (KeyError, TypeError):
+        pass
+    return None
+
+
+def is_jungler_dead(jungler_data: Dict[str, Any]) -> bool:
+    """Check if the jungler is dead or respawning."""
+    is_dead = jungler_data.get("isDead", False)
+    respawn_timer = jungler_data.get("respawnTimer", 0)
+    return is_dead or respawn_timer > 0
+
+
+# ============================================================================
+# OVERLAY GUI
+# ============================================================================
+
+class JunglerTrackerOverlay:
+    """
+    A transparent overlay window that displays enemy jungler visibility.
+    """
+
+    def __init__(self):
+        """Initialize the overlay window and start the update loop."""
+        # Create the main window
+        self.root = tk.Tk()
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.attributes("-alpha", 0.9)
+
+        try:
+            self.root.attributes("-transparentcolor", "black")
+            self.use_transparent_bg = True
+        except tk.TclError:
+            self.use_transparent_bg = False
+
+        # Set window size and position
+        self.root.geometry(f"{INDICATOR_SIZE}x{INDICATOR_SIZE}")
+        self.root.geometry(f"+{INDICATOR_PADDING}+{INDICATOR_PADDING}")
+
+        bg_color = "black" if self.use_transparent_bg else COLOR_NO_GAME
+        self.root.configure(bg=bg_color)
+
+        # Create the indicator canvas
+        self.canvas = tk.Canvas(
+            self.root,
+            width=INDICATOR_SIZE,
+            height=INDICATOR_SIZE,
+            highlightthickness=0,
+            bg=bg_color
         )
-        self.prediction_label.config(text=prediction)
-        self.update_timers_display()
-        
-    def update_timers_display(self):
-        """Update the camp timers list."""
-        self.timers_text.config(state=tk.NORMAL)
-        self.timers_text.delete(1.0, tk.END)
-        
-        current_time = time.time()
-        
-        if not self.camp_timers:
-            self.timers_text.insert(tk.END, "No camps logged yet.\n")
-            self.timers_text.insert(tk.END, "Press F1-F6 when you see camps taken.\n\n")
-            self.timers_text.insert(tk.END, "F1: Blue Buff    F2: Red Buff\n")
-            self.timers_text.insert(tk.END, "F3: Gromp        F4: Krugs\n")
-            self.timers_text.insert(tk.END, "F5: Raptors      F6: Wolves\n")
+        self.canvas.pack()
+
+        # Draw the initial indicator
+        self.indicator = self.canvas.create_oval(
+            2, 2,
+            INDICATOR_SIZE - 2, INDICATOR_SIZE - 2,
+            fill=COLOR_NO_GAME,
+            outline="#000000",
+            width=2
+        )
+
+        # State tracking
+        self.current_color = COLOR_NO_GAME
+        self.enemy_jungler_name = None
+
+        # Initialize the minimap detector
+        self.detector = MinimapDetector()
+
+        # Make draggable
+        self.canvas.bind("<Button-1>", self._start_drag)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<Button-3>", self._close_overlay)
+
+        # Start the update loop
+        self._update_visibility()
+
+        print("\nJungler Tracker Overlay started!")
+        print("- Left-click and drag to move the overlay")
+        print("- Right-click to close")
+        print("- Waiting for game data...")
+
+    def _start_drag(self, event):
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+
+    def _on_drag(self, event):
+        x = self.root.winfo_x() + (event.x - self._drag_start_x)
+        y = self.root.winfo_y() + (event.y - self._drag_start_y)
+        self.root.geometry(f"+{x}+{y}")
+
+    def _close_overlay(self, _event):
+        print("Closing overlay...")
+        self.root.destroy()
+
+    def _update_indicator(self, color: str):
+        if color != self.current_color:
+            self.canvas.itemconfig(self.indicator, fill=color)
+            self.current_color = color
+
+    def _update_visibility(self):
+        """Check visibility and update the indicator."""
+        # Get game data from API
+        game_data = get_game_data()
+
+        if game_data is None:
+            self._update_indicator(COLOR_NO_GAME)
         else:
-            # Sort by respawn time
-            sorted_camps = sorted(
-                self.camp_timers.items(),
-                key=lambda x: x[1].respawn_at
-            )
-            
-            self.timers_text.insert(tk.END, "Camp Timers:\n")
-            self.timers_text.insert(tk.END, "-" * 30 + "\n")
-            
-            for camp_name, timer in sorted_camps:
-                time_left = timer.respawn_at - current_time
-                if time_left > 0:
-                    minutes = int(time_left // 60)
-                    seconds = int(time_left % 60)
-                    status = f"{minutes}:{seconds:02d}"
+            my_team = get_active_player_team(game_data)
+
+            if my_team is None:
+                self._update_indicator(COLOR_UNKNOWN)
+            else:
+                enemy_jungler = find_enemy_jungler(game_data, my_team)
+
+                if enemy_jungler is None:
+                    self._update_indicator(COLOR_UNKNOWN)
                 else:
-                    status = "READY"
-                    
-                side_short = timer.side.replace(" Side", "")[0]
-                self.timers_text.insert(tk.END, f"{camp_name:<12} [{side_short}] {status:>6}\n")
-                
-        self.timers_text.config(state=tk.DISABLED)
-        
-        # Auto-refresh every second
-        self.root.after(1000, self.update_timers_display)
+                    champion_name = enemy_jungler.get("championName", "Unknown")
+
+                    # Update champion if changed
+                    if champion_name != self.enemy_jungler_name:
+                        self.enemy_jungler_name = champion_name
+                        print(f"\nTracking enemy jungler: {champion_name}")
+                        self.detector.set_champion(champion_name)
+
+                    # Check if jungler is dead (always show green if dead)
+                    if is_jungler_dead(enemy_jungler):
+                        self._update_indicator(COLOR_VISIBLE)
+                    else:
+                        # Check minimap visibility
+                        is_visible, confidence = self.detector.is_champion_visible()
+
+                        if is_visible:
+                            self._update_indicator(COLOR_VISIBLE)
+                        else:
+                            self._update_indicator(COLOR_INVISIBLE)
+
+        # Schedule next update
+        self.root.after(POLL_INTERVAL_MS, self._update_visibility)
+
+    def run(self):
+        """Start the overlay main loop."""
+        self.root.mainloop()
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
 
 def main():
     print("=" * 60)
-    print("Jungler Pathing Helper - MANUAL INPUT VERSION")
+    print("League of Legends Enemy Jungler Visibility Tracker")
     print("=" * 60)
-    print("\n⚠️  IMPORTANT - READ THIS:")
-    print("This tool requires MANUAL input. You MUST press F1-F6")
-    print("when you visually see the enemy jungler take a camp.")
-    print("\nHOTKEYS:")
-    for key, (name, _, side) in CAMPS.items():
-        print(f"  {key}: {name} ({side})")
-    print("\nThis tool is LEGAL because:")
-    print("  ✅ You provide all inputs manually")
-    print("  ✅ It only tracks information you witnessed")
-    print("  ✅ No automation or memory reading")
-    print("\nStarting overlay...")
-    
-    app = JunglerPathingHelper()
-    app.root.mainloop()
+    print()
+    print("This overlay uses screen capture to detect if the enemy")
+    print("jungler is visible on your minimap.")
+    print()
+    print("COLORS:")
+    print("  GREEN  = Enemy jungler is visible on minimap (or dead)")
+    print("  RED    = Enemy jungler NOT visible (be careful!)")
+    print("  YELLOW = Error or no enemy jungler found")
+    print("  GRAY   = No active game detected")
+    print()
+
+    # Check for required packages
+    try:
+        import mss
+        import cv2
+        import numpy
+    except ImportError as e:
+        print(f"ERROR: Missing required package: {e}")
+        print("Please install requirements: pip install -r requirements.txt")
+        return
+
+    # Create and run the overlay
+    overlay = JunglerTrackerOverlay()
+    overlay.run()
+
 
 if __name__ == "__main__":
     main()
