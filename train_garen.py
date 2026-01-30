@@ -133,6 +133,13 @@ def parse_args():
         help="Run quick demo to test setup (10 seconds)"
     )
 
+    parser.add_argument(
+        "--total-timesteps",
+        type=int,
+        default=None,
+        help="Override total timesteps for testing"
+    )
+
     return parser.parse_args()
 
 
@@ -215,10 +222,11 @@ def main():
         return
 
     # Create trainer
+    total_steps = args.total_timesteps if args.total_timesteps else stage_config['duration_steps']
     trainer = GarenTrainer(
         env=env,
         agent=agent,
-        total_timesteps=stage_config['duration_steps'],
+        total_timesteps=total_steps,
         checkpoint_dir=args.checkpoint_dir
     )
 

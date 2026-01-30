@@ -167,6 +167,9 @@ class ScreenCapture:
 
     def _capture_loop(self):
         """Main capture loop running in separate thread"""
+        # Re-initialize MSS in this thread (required for Linux/X11)
+        self.sct = mss.mss()
+
         frame_num = 0
         last_frame_time = time.time()
 
