@@ -1,6 +1,28 @@
+# Core dependencies
 requests>=2.25.0
 urllib3>=1.26.0
 mss>=6.0.0
 opencv-python>=4.5.0
 numpy>=1.19.0
 Pillow>=8.0.0
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computer Vision
+ultralytics>=8.0.0  # YOLOv8/v11
+
+# Reinforcement Learning
+gymnasium>=0.29.0
+
+# Input Control (Linux)
+pynput>=1.7.6
+
+# Visualization
+matplotlib>=3.5.0
+
+# Utilities
+tqdm>=4.65.0
+psutil>=5.9.0
+pyyaml>=6.0
