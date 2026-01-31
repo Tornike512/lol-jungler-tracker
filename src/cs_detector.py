@@ -102,30 +102,31 @@ class CSDetector:
         # Adjust these values if they don't match your setup
 
         if self.screen_width == 1920 and self.screen_height == 1080:
-            # 1080p settings - CS counter near minimap
+            # 1080p settings - CS counter in top-right scoreboard
+            # User provided: x=1720 to x=1800, y=13
             self.cs_region = {
-                "left": 1685,
-                "top": 755,
-                "width": 60,
-                "height": 30
+                "left": 1720,
+                "top": 8,
+                "width": 80,
+                "height": 20
             }
         elif self.screen_width == 2560 and self.screen_height == 1440:
-            # 1440p settings
+            # 1440p settings - scale from 1080p
             self.cs_region = {
-                "left": 2250,
-                "top": 1010,
-                "width": 80,
-                "height": 40
+                "left": 527,
+                "top": 1000,
+                "width": 60,
+                "height": 33
             }
         else:
             # Scale from 1080p
             scale_x = self.screen_width / 1920
             scale_y = self.screen_height / 1080
             self.cs_region = {
-                "left": int(1685 * scale_x),
-                "top": int(755 * scale_y),
-                "width": int(60 * scale_x),
-                "height": int(30 * scale_y)
+                "left": int(395 * scale_x),
+                "top": int(750 * scale_y),
+                "width": int(45 * scale_x),
+                "height": int(25 * scale_y)
             }
 
     def capture_cs_region(self) -> Optional[np.ndarray]:
