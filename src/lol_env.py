@@ -13,6 +13,7 @@ from .config import vision_cfg, action_cfg, reward_cfg, safety_cfg, capture_cfg
 from .capture import ScreenCapture, FrameData
 from .vision import VisionPipeline, GameState
 from .input_controller import InputController
+from .cs_detector import CSDetector
 
 # Global kill switch flag
 _kill_switch_pressed = False
@@ -118,6 +119,14 @@ class LoLEnvironment(gym.Env):
                 print(f"Warning: Could not initialize input controller: {e}")
                 print("Running in observation-only mode")
 
+        # CS detector for reward calculation
+        self.cs_detector = CSDetector(
+            screen_width=capture_cfg.SCREEN_WIDTH,
+            screen_height=capture_cfg.SCREEN_HEIGHT,
+            update_interval=0.5  # Update every 0.5 seconds
+        )
+        self.last_cs_reward_cs = 0  # Track CS for reward calculation
+
         # Episode tracking
         self.episode_steps = 0
         self.episode_reward = 0.0
@@ -166,6 +175,11 @@ class LoLEnvironment(gym.Env):
         self.total_deaths = 0
         self.total_objectives = 0
 
+        # Reset CS detector
+        self.cs_detector.reset()
+        self.current_cs = 0
+        self.cs_gained = 0
+
         # Start screen capture if not already running
         if not self.capture.running:
             self.capture.start()
@@ -208,6 +222,9 @@ class LoLEnvironment(gym.Env):
 
         # Get new observation
         observation = self._get_observation()
+
+        # Update CS detector
+        self.current_cs, self.cs_gained = self.cs_detector.update()
 
         # Calculate reward
         reward = self._calculate_reward()
@@ -268,17 +285,18 @@ class LoLEnvironment(gym.Env):
         """Reward function for CS training stage"""
         reward = 0.0
 
-        # Detect CS hits by checking for gold increase
-        # (This is simplified - real implementation would use game API)
+        # BIG REWARD: CS gained (detected via OCR)
+        if self.cs_gained > 0:
+            # Main reward signal - this is what we want the agent to learn!
+            reward += reward_cfg.REWARD_CS_HIT * self.cs_gained
+            self.total_cs += self.cs_gained
+            print(f"  +++ CS REWARD: +{self.cs_gained} CS (total: {self.total_cs}) reward: +{reward_cfg.REWARD_CS_HIT * self.cs_gained:.2f}")
 
-        # Reward for staying active (not idle)
+        # Small reward for staying active (not idle)
         if self.input_controller and self.input_controller.get_current_apm() > 20:
-            reward += 0.01
+            reward += 0.001  # Much smaller than CS reward
         else:
-            reward += reward_cfg.PENALTY_IDLE_PER_SECOND * 0.1
-
-        # Placeholder: Detect level up
-        # Real implementation would check game state from Riot API
+            reward += reward_cfg.PENALTY_IDLE_PER_SECOND * 0.01
 
         return reward
 
@@ -366,6 +384,13 @@ class LoLEnvironment(gym.Env):
             info["player_hp"] = self.current_game_state.player_hp_percent
             info["player_mana"] = self.current_game_state.player_mana_percent
             info["detections"] = len(self.current_game_state.detections)
+
+        # Add CS stats
+        if self.cs_detector:
+            cs_stats = self.cs_detector.get_stats()
+            info["cs"] = cs_stats["current_cs"]
+            info["cs_per_minute"] = cs_stats["cs_per_minute"]
+            info["total_cs"] = self.total_cs
 
         return info
 

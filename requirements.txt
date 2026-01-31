@@ -12,6 +12,7 @@ torchvision>=0.15.0
 
 # Computer Vision
 ultralytics>=8.0.0  # YOLOv8/v11
+easyocr>=1.7.0  # OCR for CS detection
 
 # Reinforcement Learning
 gymnasium>=0.29.0
