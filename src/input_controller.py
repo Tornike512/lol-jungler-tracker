@@ -18,6 +18,59 @@ if PLATFORM == "Windows":
     try:
         import ctypes
         from ctypes import wintypes
+
+        # Windows input structures
+        MOUSEEVENTF_MOVE = 0x0001
+        MOUSEEVENTF_LEFTDOWN = 0x0002
+        MOUSEEVENTF_LEFTUP = 0x0004
+        MOUSEEVENTF_RIGHTDOWN = 0x0008
+        MOUSEEVENTF_RIGHTUP = 0x0010
+        MOUSEEVENTF_ABSOLUTE = 0x8000
+
+        KEYEVENTF_KEYUP = 0x0002
+
+        # Virtual key codes
+        VK_CODES = {
+            'q': 0x51, 'w': 0x57, 'e': 0x45, 'r': 0x52,
+            'd': 0x44, 'f': 0x46, 'a': 0x41, 's': 0x53,
+            'b': 0x42, 'p': 0x50, 'tab': 0x09,
+            '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
+            '5': 0x35, '6': 0x36, '7': 0x37,
+            'ctrl': 0x11, 'shift': 0x10, 'alt': 0x12,
+            'space': 0x20, 'spacebar': 0x20,
+        }
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))
+            ]
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))
+            ]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [
+                ("mi", MOUSEINPUT),
+                ("ki", KEYBDINPUT),
+            ]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [
+                ("type", wintypes.DWORD),
+                ("union", INPUT_UNION)
+            ]
+
         WINDOWS_API_AVAILABLE = True
     except ImportError:
         WINDOWS_API_AVAILABLE = False
@@ -137,9 +190,15 @@ class InputController:
 
     def _init_windows(self):
         """Initialize Windows-specific input simulation"""
-        # Windows SendInput structures (if needed)
-        # This is a simplified version - full implementation would need complete ctypes definitions
-        pass
+        # Get initial mouse position
+        point = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+        self.mouse_state.x = point.x
+        self.mouse_state.y = point.y
+
+        # Get screen dimensions for absolute positioning
+        self.screen_width = ctypes.windll.user32.GetSystemMetrics(0)
+        self.screen_height = ctypes.windll.user32.GetSystemMetrics(1)
 
     def _init_linux(self):
         """Initialize Linux-specific input simulation"""
@@ -258,7 +317,8 @@ class InputController:
         """Set mouse position (platform-specific)"""
         if self.platform == "Linux":
             self.mouse.position = (x, y)
-        # Windows implementation would use SetCursorPos
+        elif self.platform == "Windows":
+            ctypes.windll.user32.SetCursorPos(x, y)
 
         self.mouse_state.x = x
         self.mouse_state.y = y
@@ -296,7 +356,31 @@ class InputController:
                 if clicks > 1:
                     time.sleep(random.uniform(0.08, 0.12))  # Delay between clicks
 
-        # Windows implementation would use SendInput
+        elif self.platform == "Windows":
+            if button == "left":
+                down_flag = MOUSEEVENTF_LEFTDOWN
+                up_flag = MOUSEEVENTF_LEFTUP
+            else:
+                down_flag = MOUSEEVENTF_RIGHTDOWN
+                up_flag = MOUSEEVENTF_RIGHTUP
+
+            for _ in range(clicks):
+                # Mouse down
+                input_down = INPUT()
+                input_down.type = 0  # INPUT_MOUSE
+                input_down.union.mi.dwFlags = down_flag
+                ctypes.windll.user32.SendInput(1, ctypes.byref(input_down), ctypes.sizeof(INPUT))
+
+                time.sleep(random.uniform(0.05, 0.08))
+
+                # Mouse up
+                input_up = INPUT()
+                input_up.type = 0  # INPUT_MOUSE
+                input_up.union.mi.dwFlags = up_flag
+                ctypes.windll.user32.SendInput(1, ctypes.byref(input_up), ctypes.sizeof(INPUT))
+
+                if clicks > 1:
+                    time.sleep(random.uniform(0.08, 0.12))
 
         self.mouse_state.last_click_time = time.time()
         self.add_action_timestamp()
@@ -355,7 +439,42 @@ class InputController:
                 self.keyboard.release(key_obj)
                 time.sleep(random.uniform(0.01, 0.03))
 
-        # Windows implementation would use SendInput
+        elif self.platform == "Windows":
+            # Press keys in order
+            pressed_vks = []
+            for k in keys_to_press:
+                vk = VK_CODES.get(k)
+                if vk is None:
+                    # Try single character
+                    if len(k) == 1:
+                        vk = ord(k.upper())
+                    else:
+                        continue
+
+                # Key down
+                input_down = INPUT()
+                input_down.type = 1  # INPUT_KEYBOARD
+                input_down.union.ki.wVk = vk
+                input_down.union.ki.dwFlags = 0
+                ctypes.windll.user32.SendInput(1, ctypes.byref(input_down), ctypes.sizeof(INPUT))
+
+                pressed_vks.append(vk)
+                time.sleep(random.uniform(0.01, 0.03))
+
+            # Hold if specified
+            if hold_duration:
+                time.sleep(hold_duration)
+            else:
+                time.sleep(random.uniform(0.05, 0.08))
+
+            # Release in reverse order
+            for vk in reversed(pressed_vks):
+                input_up = INPUT()
+                input_up.type = 1  # INPUT_KEYBOARD
+                input_up.union.ki.wVk = vk
+                input_up.union.ki.dwFlags = KEYEVENTF_KEYUP
+                ctypes.windll.user32.SendInput(1, ctypes.byref(input_up), ctypes.sizeof(INPUT))
+                time.sleep(random.uniform(0.01, 0.03))
 
         self.keyboard_state.last_key_time = time.time()
         self.add_action_timestamp()

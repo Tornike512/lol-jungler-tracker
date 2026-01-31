@@ -7,7 +7,8 @@
       "Bash(powershell -Command \"Get-Content ''C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Desktop-lol-jungler-tracker\\\\tasks\\\\b0fdf44.output''\")",
       "Bash(tasklist:*)",
       "Bash(taskkill:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Skill(ralph-loop:ralph-loop)"
     ]
   }
 }
