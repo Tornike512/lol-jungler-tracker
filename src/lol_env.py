@@ -6,6 +6,7 @@ import time
 import threading
 from typing import Tuple, Dict, Any, Optional
 import numpy as np
+import cv2
 import gymnasium as gym
 from gymnasium import spaces
 
@@ -370,9 +371,16 @@ class LoLEnvironment(gym.Env):
         # 4. Screen center reward - stay in playable area
         shaping_reward += self._reward_screen_position()
 
-        # Add shaping to total (but print if significant)
-        if shaping_reward > 0.01:
-            print(f"      shaping: +{shaping_reward:.4f}")
+        # 5. Camera lock reward - keep camera locked (penalize Y key)
+        shaping_reward += self._reward_camera_lock()
+
+        # 6. Top lane positioning - Garen should stay in top lane
+        shaping_reward += self._reward_top_lane_position()
+
+        # 7. Shop penalty - don't click on shop or stay in base
+        shaping_reward += self._reward_no_shop()
+
+        # Add shaping to total (don't print every time - too spammy)
         reward += shaping_reward
 
         # Small penalty for being completely idle
@@ -468,6 +476,112 @@ class LoLEnvironment(gym.Env):
         if x_norm < 0.6 and y_norm < 0.6:
             return reward_cfg.REWARD_SCREEN_CENTER
         return 0.0
+
+    def _reward_camera_lock(self) -> float:
+        """
+        Reward for keeping camera locked.
+        Since Y key is not in the action space, agent can't unlock camera.
+        Just give a small constant reward as long as we assume camera is locked.
+        """
+        # Y key is not in KEYBOARD_KEYS, so agent cannot press it
+        # Give small reward for having camera locked (which should always be true)
+        return reward_cfg.REWARD_CAMERA_LOCKED
+
+    def _reward_top_lane_position(self) -> float:
+        """
+        Reward for being in top lane (Garen's lane).
+        Detects position from minimap - top lane is in top-left area.
+        """
+        reward = 0.0
+
+        # Get minimap from capture
+        frame_data = self.capture.get_latest_frame()
+        if frame_data is None or "minimap" not in frame_data.regions:
+            return reward
+
+        minimap = frame_data.regions["minimap"]
+        if minimap is None:
+            return reward
+
+        # Analyze minimap to find player position
+        # Player icon is typically a bright circle/arrow
+        # In top lane, player should be in top-left quadrant of minimap
+        player_pos = self._find_player_on_minimap(minimap)
+
+        if player_pos is not None:
+            px, py = player_pos
+            minimap_h, minimap_w = minimap.shape[:2]
+
+            # Normalize position (0-1 scale)
+            px_norm = px / minimap_w
+            py_norm = py / minimap_h
+
+            # Top lane is roughly:
+            # - X: 0.0 to 0.5 (left half) or along the diagonal
+            # - Y: 0.0 to 0.5 (top half)
+            # The lane runs diagonally from top-left to somewhere in the middle
+
+            # Check if in top lane area (top-left quadrant + diagonal)
+            in_top_lane = False
+
+            # Top-left quadrant check
+            if px_norm < 0.4 and py_norm < 0.4:
+                in_top_lane = True
+            # Diagonal lane check (top lane runs from top-left toward center)
+            elif px_norm < 0.6 and py_norm < 0.6 and (px_norm + py_norm) < 0.8:
+                in_top_lane = True
+
+            if in_top_lane:
+                reward += reward_cfg.REWARD_TOP_LANE
+            else:
+                # Penalize being in wrong area (mid, bot, jungle)
+                reward += reward_cfg.PENALTY_WRONG_LANE
+
+        return reward
+
+    def _find_player_on_minimap(self, minimap: np.ndarray) -> Optional[tuple]:
+        """
+        Find player position on minimap.
+        Returns (x, y) coordinates or None if not found.
+        """
+        try:
+            # Player icon is typically bright (white/yellow/green depending on team)
+            # Convert to HSV for better color detection
+            hsv = cv2.cvtColor(minimap, cv2.COLOR_BGR2HSV)
+
+            # Look for bright spots (player arrow/circle is usually very bright)
+            # The player's own icon is typically cyan/teal for blue team or red for red team
+            # But it's always the brightest element in its area
+
+            # Method 1: Find brightest point
+            gray = cv2.cvtColor(minimap, cv2.COLOR_BGR2GRAY)
+            # Apply slight blur to reduce noise
+            gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+            # Find the maximum brightness point
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(gray)
+
+            # The brightest point is likely the player icon
+            if max_val > 200:  # Threshold for "bright"
+                return max_loc  # Returns (x, y)
+
+            # Method 2: Look for cyan/teal color (blue team player icon)
+            # Cyan in HSV: H=80-100, S=100-255, V=200-255
+            lower_cyan = np.array([80, 100, 200])
+            upper_cyan = np.array([100, 255, 255])
+            mask = cv2.inRange(hsv, lower_cyan, upper_cyan)
+
+            # Find centroid of cyan areas
+            moments = cv2.moments(mask)
+            if moments["m00"] > 0:
+                cx = int(moments["m10"] / moments["m00"])
+                cy = int(moments["m01"] / moments["m00"])
+                return (cx, cy)
+
+            return None
+
+        except Exception:
+            return None
 
     def _get_minion_detections(self):
         """Get minion-like detections from current game state"""

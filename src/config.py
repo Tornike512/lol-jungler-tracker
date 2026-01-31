@@ -247,6 +247,19 @@ class RewardConfig:
     # Screen center preference - encourage staying in playable area
     REWARD_SCREEN_CENTER: float = 0.002  # Being in center of screen (where action is)
 
+    # Camera lock - Garen should keep camera locked during laning
+    PENALTY_CAMERA_UNLOCK: float = -0.5  # Pressing Y to unlock camera
+    REWARD_CAMERA_LOCKED: float = 0.001  # Small continuous reward for locked camera
+
+    # Top lane positioning - Garen is a top laner
+    REWARD_TOP_LANE: float = 0.01  # Being in top lane area on minimap
+    PENALTY_WRONG_LANE: float = -0.02  # Being in mid/bot/jungle
+    REWARD_PATHING_TOP: float = 0.005  # Moving toward top lane
+
+    # Shop penalty - don't open shop during laning
+    PENALTY_SHOP_CLICK: float = -0.5  # Clicking on shop area
+    PENALTY_IN_BASE: float = -0.03  # Being in fountain/base area
+
     # Stage 2: Trading
     REWARD_DAMAGE_DEALT: float = 0.02  # Per point of damage
     PENALTY_DAMAGE_TAKEN: float = -0.03
