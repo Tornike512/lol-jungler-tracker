@@ -43,11 +43,15 @@ class GarenNet(torch.nn.Module):
 class GarenPredictor:
     def __init__(self):
         # Load model
+        print("[*] Creating model architecture...")
         self.model = GarenNet(input_size=19)
-        self.model.load_state_dict(torch.load(MODEL_FILE, weights_only=True))
+        print("[*] Loading model weights...")
+        self.model.load_state_dict(torch.load(MODEL_FILE, weights_only=True, map_location='cpu'))
         self.model.eval()
+        print("[*] Model loaded!")
 
         # Load scaler
+        print("[*] Loading scaler...")
         with open(SCALER_FILE, 'rb') as f:
             self.scaler = pickle.load(f)
 
