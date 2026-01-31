@@ -3,6 +3,7 @@ League of Legends Gymnasium Environment
 Wraps the capture, vision, and input systems into a standard RL environment.
 """
 import time
+import threading
 from typing import Tuple, Dict, Any, Optional
 import numpy as np
 import gymnasium as gym
@@ -12,6 +13,47 @@ from .config import vision_cfg, action_cfg, reward_cfg, safety_cfg, capture_cfg
 from .capture import ScreenCapture, FrameData
 from .vision import VisionPipeline, GameState
 from .input_controller import InputController
+
+# Global kill switch flag
+_kill_switch_pressed = False
+_kill_switch_listener = None
+
+
+def _start_kill_switch_listener():
+    """Start a background listener for the kill switch (F12)"""
+    global _kill_switch_listener, _kill_switch_pressed
+
+    try:
+        from pynput import keyboard
+
+        def on_press(key):
+            global _kill_switch_pressed
+            try:
+                if key == keyboard.Key.f12:
+                    print("\n\n*** F12 KILL SWITCH ACTIVATED ***")
+                    print("Stopping training gracefully...")
+                    _kill_switch_pressed = True
+                    return False  # Stop listener
+            except:
+                pass
+
+        _kill_switch_listener = keyboard.Listener(on_press=on_press)
+        _kill_switch_listener.start()
+        print(f"Kill switch enabled: Press {safety_cfg.KILL_SWITCH_KEY} to stop")
+
+    except Exception as e:
+        print(f"Warning: Could not start kill switch listener: {e}")
+
+
+def is_kill_switch_pressed() -> bool:
+    """Check if kill switch was pressed"""
+    return _kill_switch_pressed
+
+
+def reset_kill_switch():
+    """Reset kill switch state"""
+    global _kill_switch_pressed
+    _kill_switch_pressed = False
 
 
 class LoLEnvironment(gym.Env):
@@ -90,6 +132,9 @@ class LoLEnvironment(gym.Env):
         self.total_kills = 0
         self.total_deaths = 0
         self.total_objectives = 0
+
+        # Start kill switch listener
+        _start_kill_switch_listener()
 
         print("Environment initialized successfully")
 
@@ -278,7 +323,11 @@ class LoLEnvironment(gym.Env):
         return penalty
 
     def _is_terminated(self) -> bool:
-        """Check if episode should terminate (game ended)"""
+        """Check if episode should terminate (game ended or kill switch pressed)"""
+        # Check kill switch
+        if is_kill_switch_pressed():
+            return True
+
         # This would require checking game state from Riot API
         # For now, just return False
         return False
@@ -334,6 +383,12 @@ class LoLEnvironment(gym.Env):
 
         if self.capture:
             self.capture.stop()
+
+        # Stop kill switch listener
+        global _kill_switch_listener
+        if _kill_switch_listener:
+            _kill_switch_listener.stop()
+            _kill_switch_listener = None
 
         print("Environment closed")
 

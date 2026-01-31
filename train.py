@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 import numpy as np
 
 from src.config import rl_cfg, logging_cfg, safety_cfg
-from src.lol_env import LoLEnvironment, LoLPracticeTool
+from src.lol_env import LoLEnvironment, LoLPracticeTool, is_kill_switch_pressed
 from src.rl_agent import PPOAgent
 
 
@@ -151,6 +151,12 @@ class Trainer:
                 episode_reward += reward
                 episode_length += 1
                 self.timesteps_done += 1
+
+                # Check kill switch
+                if is_kill_switch_pressed():
+                    print("\nKill switch detected - stopping training...")
+                    self._save_checkpoint()
+                    return
 
                 # Handle episode end
                 if terminated or truncated:
