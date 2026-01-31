@@ -3,10 +3,11 @@ Training Script for LoL RL Agent
 Implements the main training loop with curriculum learning and checkpointing.
 """
 import os
+import re
 import time
 import argparse
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import numpy as np
 
 from src.config import rl_cfg, logging_cfg, safety_cfg
@@ -300,6 +301,27 @@ def parse_args():
     return parser.parse_args()
 
 
+def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
+    """Find the latest checkpoint based on timestep number in filename."""
+    checkpoint_path = Path(checkpoint_dir)
+    if not checkpoint_path.exists():
+        return None
+
+    latest_checkpoint = None
+    latest_timestep = -1
+
+    for checkpoint_file in checkpoint_path.glob("checkpoint_*.pt"):
+        # Extract timestep number from filename (e.g., checkpoint_4068.pt -> 4068)
+        match = re.search(r"checkpoint_(\d+)\.pt$", checkpoint_file.name)
+        if match:
+            timestep = int(match.group(1))
+            if timestep > latest_timestep:
+                latest_timestep = timestep
+                latest_checkpoint = str(checkpoint_file)
+
+    return latest_checkpoint
+
+
 def main():
     """Main training entry point"""
     args = parse_args()
@@ -341,10 +363,16 @@ def main():
     # Create agent
     agent = PPOAgent()
 
-    # Resume from checkpoint if specified
-    if args.resume:
-        print(f"Resuming from checkpoint: {args.resume}")
-        agent.load(args.resume)
+    # Resume from checkpoint - auto-detect latest if not specified
+    resume_path = args.resume
+    if resume_path is None:
+        resume_path = find_latest_checkpoint(args.checkpoint_dir)
+        if resume_path:
+            print(f"Auto-detected latest checkpoint: {resume_path}")
+
+    if resume_path:
+        print(f"Resuming from checkpoint: {resume_path}")
+        agent.load(resume_path)
 
     # Create trainer
     trainer = Trainer(

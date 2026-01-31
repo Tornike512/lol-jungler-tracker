@@ -6,7 +6,7 @@ import argparse
 import time
 from pathlib import Path
 
-from train import Trainer, RolloutBuffer
+from train import Trainer, RolloutBuffer, find_latest_checkpoint
 from src.lol_env import LoLPracticeTool
 from src.rl_agent import PPOAgent
 from src.garen_config import (
@@ -194,10 +194,16 @@ def main():
     # Create agent
     agent = PPOAgent()
 
-    # Resume from checkpoint if specified
-    if args.resume:
-        print(f"Resuming from checkpoint: {args.resume}")
-        agent.load(args.resume)
+    # Resume from checkpoint - auto-detect latest if not specified
+    resume_path = args.resume
+    if resume_path is None:
+        resume_path = find_latest_checkpoint(args.checkpoint_dir)
+        if resume_path:
+            print(f"Auto-detected latest checkpoint: {resume_path}")
+
+    if resume_path:
+        print(f"Resuming from checkpoint: {resume_path}")
+        agent.load(resume_path)
 
     # Demo mode (quick test)
     if args.demo:

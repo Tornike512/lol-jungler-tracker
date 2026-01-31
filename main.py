@@ -237,9 +237,9 @@ def main():
         )
 
     elif args.command == "train":
-        print("For training, please use train.py directly:")
-        print("  python train.py --help")
-        sys.exit(0)
+        # Import and run training with auto-resume
+        from train import main as train_main
+        train_main()
 
     else:
         print("Please specify a command: demo, infer, or train")
