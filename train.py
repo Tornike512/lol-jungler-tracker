@@ -111,6 +111,8 @@ class Trainer:
 
         # Performance tracking
         self.training_start_time = time.time()
+        self.last_progress_print = time.time()
+        self.progress_print_interval = 30.0  # Print progress every 30 seconds
 
     def train(self):
         """Main training loop"""
@@ -157,6 +159,11 @@ class Trainer:
                     print("\nKill switch detected - stopping training...")
                     self._save_checkpoint()
                     return
+
+                # Print progress every N seconds (so user knows it's working)
+                if time.time() - self.last_progress_print > self.progress_print_interval:
+                    self._print_progress(episode_reward, episode_length)
+                    self.last_progress_print = time.time()
 
                 # Handle episode end
                 if terminated or truncated:
@@ -214,25 +221,58 @@ class Trainer:
 
         avg_reward = np.mean(recent_rewards)
         avg_length = np.mean(recent_lengths)
+        max_reward = np.max(recent_rewards) if recent_rewards else 0
+        min_reward = np.min(recent_rewards) if recent_rewards else 0
 
         elapsed_time = time.time() - self.training_start_time
         fps = self.timesteps_done / elapsed_time
+        hours = int(elapsed_time // 3600)
+        mins = int((elapsed_time % 3600) // 60)
 
-        print(f"Episode {self.episodes_done}")
-        print(f"  Timesteps: {self.timesteps_done:,} / {self.total_timesteps:,}")
-        print(f"  Avg Reward: {avg_reward:.2f}")
-        print(f"  Avg Length: {avg_length:.0f}")
-        print(f"  FPS: {fps:.1f}")
+        print()
+        print("=" * 60)
+        print(f"Episode {self.episodes_done} | Time: {hours}h {mins}m | Steps: {self.timesteps_done:,}/{self.total_timesteps:,}")
+        print("=" * 60)
+        print(f"  Avg Reward:  {avg_reward:.3f}  (min: {min_reward:.3f}, max: {max_reward:.3f})")
+        print(f"  Avg Length:  {avg_length:.0f} steps")
+        print(f"  FPS:         {fps:.1f}")
+        print(f"  Best Reward: {self.best_reward:.3f}")
+
+        # Show CS stats if available
+        if hasattr(self.env, 'total_cs'):
+            print(f"  Total CS:    {self.env.total_cs}")
+        if hasattr(self.env, 'cs_detector'):
+            cs_stats = self.env.cs_detector.get_stats()
+            print(f"  CS/min:      {cs_stats['cs_per_minute']:.1f}")
+            print(f"  OCR Acc:     {cs_stats['accuracy']:.1%}")
+
         print()
 
         # Track best reward
         if avg_reward > self.best_reward:
             self.best_reward = avg_reward
+            print(f"  *** New best reward! Saving checkpoint... ***")
             self._save_checkpoint(best=True)
+
+    def _print_progress(self, current_episode_reward: float, current_episode_length: int):
+        """Print periodic progress update during training"""
+        elapsed = time.time() - self.training_start_time
+        hours = int(elapsed // 3600)
+        mins = int((elapsed % 3600) // 60)
+        secs = int(elapsed % 60)
+
+        fps = self.timesteps_done / elapsed if elapsed > 0 else 0
+        progress = (self.timesteps_done / self.total_timesteps) * 100
+
+        print(f"\r[{hours:02d}:{mins:02d}:{secs:02d}] "
+              f"Steps: {self.timesteps_done:,} ({progress:.1f}%) | "
+              f"Episode: {self.episodes_done} | "
+              f"Reward: {current_episode_reward:.2f} | "
+              f"FPS: {fps:.1f}", end="", flush=True)
 
     def _log_training_metrics(self, metrics: Dict[str, float]):
         """Log training metrics"""
-        print(f"Training Update {self.agent.n_updates}")
+        print(f"\nTraining Update {self.agent.n_updates}")
         print(f"  Policy Loss: {metrics['policy_loss']:.4f}")
         print(f"  Value Loss: {metrics['value_loss']:.4f}")
         print(f"  Entropy: {metrics['entropy_loss']:.4f}")

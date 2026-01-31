@@ -127,6 +127,12 @@ class LoLEnvironment(gym.Env):
         )
         self.last_cs_reward_cs = 0  # Track CS for reward calculation
 
+        # Shaping reward tracking
+        self.last_minion_distance = None  # Track distance to nearest minion
+        self.last_action = None  # Track last action for reward shaping
+        self.mouse_x = capture_cfg.SCREEN_WIDTH // 2
+        self.mouse_y = capture_cfg.SCREEN_HEIGHT // 2
+
         # Episode tracking
         self.episode_steps = 0
         self.episode_reward = 0.0
@@ -180,6 +186,12 @@ class LoLEnvironment(gym.Env):
         self.current_cs = 0
         self.cs_gained = 0
 
+        # Reset shaping reward tracking
+        self.last_minion_distance = None
+        self.last_action = None
+        self.mouse_x = capture_cfg.SCREEN_WIDTH // 2
+        self.mouse_y = capture_cfg.SCREEN_HEIGHT // 2
+
         # Start screen capture if not already running
         if not self.capture.running:
             self.capture.start()
@@ -209,6 +221,22 @@ class LoLEnvironment(gym.Env):
             (observation, reward, terminated, truncated, info)
         """
         self.episode_steps += 1
+
+        # Track action for reward shaping
+        self.last_action = action
+
+        # Update estimated mouse position from action
+        if "continuous" in action:
+            continuous = action["continuous"]
+            # Mouse moves up to 200 pixels per action
+            self.mouse_x = int(np.clip(
+                self.mouse_x + continuous[0] * 200,
+                0, capture_cfg.SCREEN_WIDTH - 1
+            ))
+            self.mouse_y = int(np.clip(
+                self.mouse_y + continuous[1] * 200,
+                0, capture_cfg.SCREEN_HEIGHT - 1
+            ))
 
         # Execute action
         if self.input_controller is not None and not self.headless:
@@ -282,23 +310,153 @@ class LoLEnvironment(gym.Env):
         return reward
 
     def _reward_cs_training(self) -> float:
-        """Reward function for CS training stage"""
+        """Reward function for CS training stage with shaping rewards"""
         reward = 0.0
 
-        # BIG REWARD: CS gained (detected via OCR)
+        # =======================================================================
+        # PRIMARY REWARD: CS gained (detected via OCR)
+        # This is the main goal - everything else is shaping to help discover it
+        # =======================================================================
         if self.cs_gained > 0:
-            # Main reward signal - this is what we want the agent to learn!
             reward += reward_cfg.REWARD_CS_HIT * self.cs_gained
             self.total_cs += self.cs_gained
             print(f"  +++ CS REWARD: +{self.cs_gained} CS (total: {self.total_cs}) reward: +{reward_cfg.REWARD_CS_HIT * self.cs_gained:.2f}")
 
-        # Small reward for staying active (not idle)
-        if self.input_controller and self.input_controller.get_current_apm() > 20:
-            reward += 0.001  # Much smaller than CS reward
-        else:
+        # =======================================================================
+        # SHAPING REWARDS: Guide agent toward farming behavior
+        # =======================================================================
+        shaping_reward = 0.0
+
+        # 1. Lane presence reward - be in the center area of screen
+        shaping_reward += self._reward_lane_presence()
+
+        # 2. Minion proximity rewards (if we have detections)
+        shaping_reward += self._reward_minion_proximity()
+
+        # 3. Attack action reward - encourage right-clicking
+        shaping_reward += self._reward_attack_action()
+
+        # 4. Screen center reward - stay in playable area
+        shaping_reward += self._reward_screen_position()
+
+        # Add shaping to total (but print if significant)
+        if shaping_reward > 0.01:
+            print(f"      shaping: +{shaping_reward:.4f}")
+        reward += shaping_reward
+
+        # Small penalty for being completely idle
+        if self.input_controller and self.input_controller.get_current_apm() < 10:
             reward += reward_cfg.PENALTY_IDLE_PER_SECOND * 0.01
 
         return reward
+
+    def _reward_lane_presence(self) -> float:
+        """Reward for being in the lane area (center of screen)"""
+        # In LoL, during laning, the action happens in the center of the screen
+        # Reward being in the vertical center (not too far up or down)
+        screen_center_y = capture_cfg.SCREEN_HEIGHT // 2
+        y_distance = abs(self.mouse_y - screen_center_y) / (capture_cfg.SCREEN_HEIGHT // 2)
+
+        # More reward for being closer to center
+        if y_distance < 0.5:  # Within center half of screen
+            return reward_cfg.REWARD_LANE_PRESENCE
+        return 0.0
+
+    def _reward_minion_proximity(self) -> float:
+        """Reward for being near minions and approaching them"""
+        reward = 0.0
+
+        if self.current_game_state is None:
+            return reward
+
+        # Find minion detections
+        minions = self._get_minion_detections()
+
+        if not minions:
+            # No minions detected - give small reward for being in lane area anyway
+            # This helps when YOLO doesn't detect LoL-specific objects
+            return 0.0
+
+        # Calculate distance to nearest minion
+        nearest_distance = float('inf')
+        nearest_minion = None
+
+        player_x = capture_cfg.SCREEN_WIDTH // 2  # Assume player at center
+        player_y = capture_cfg.SCREEN_HEIGHT // 2
+
+        for minion in minions:
+            center_x, center_y = minion.center
+            # Normalized distance
+            dist = np.sqrt(
+                ((center_x - player_x) / capture_cfg.SCREEN_WIDTH) ** 2 +
+                ((center_y - player_y) / capture_cfg.SCREEN_HEIGHT) ** 2
+            )
+            if dist < nearest_distance:
+                nearest_distance = dist
+                nearest_minion = minion
+
+        # Reward for being close to minions
+        if nearest_distance < reward_cfg.MINION_PROXIMITY_THRESHOLD:
+            reward += reward_cfg.REWARD_NEAR_MINIONS
+
+        # Reward for cursor being near minion
+        if nearest_minion:
+            cursor_dist = np.sqrt(
+                ((self.mouse_x - nearest_minion.center[0]) / capture_cfg.SCREEN_WIDTH) ** 2 +
+                ((self.mouse_y - nearest_minion.center[1]) / capture_cfg.SCREEN_HEIGHT) ** 2
+            )
+            if cursor_dist < reward_cfg.CURSOR_TARGET_THRESHOLD:
+                reward += reward_cfg.REWARD_CURSOR_NEAR_MINION
+
+        # Reward for moving closer to minions (approach reward)
+        if self.last_minion_distance is not None and nearest_distance < self.last_minion_distance:
+            reward += reward_cfg.REWARD_APPROACH_MINION
+
+        self.last_minion_distance = nearest_distance
+
+        return reward
+
+    def _reward_attack_action(self) -> float:
+        """Reward for taking attack actions (right-click)"""
+        if self.last_action is None:
+            return 0.0
+
+        # Right-click is action 2 in discrete_mouse
+        discrete_mouse = self.last_action.get("discrete_mouse", 0)
+        if discrete_mouse == 2:  # Right click
+            return reward_cfg.REWARD_ATTACK_ACTION
+
+        return 0.0
+
+    def _reward_screen_position(self) -> float:
+        """Reward for keeping mouse in the center playable area"""
+        # Reward being in the center 60% of the screen
+        x_norm = abs(self.mouse_x - capture_cfg.SCREEN_WIDTH // 2) / (capture_cfg.SCREEN_WIDTH // 2)
+        y_norm = abs(self.mouse_y - capture_cfg.SCREEN_HEIGHT // 2) / (capture_cfg.SCREEN_HEIGHT // 2)
+
+        if x_norm < 0.6 and y_norm < 0.6:
+            return reward_cfg.REWARD_SCREEN_CENTER
+        return 0.0
+
+    def _get_minion_detections(self):
+        """Get minion-like detections from current game state"""
+        if self.current_game_state is None:
+            return []
+
+        minions = []
+        minion_classes = {"minion_melee", "minion_ranged", "minion_cannon", "minion_super"}
+
+        for detection in self.current_game_state.detections:
+            # Check if it's a minion class
+            if detection.class_name in minion_classes:
+                minions.append(detection)
+            # Also accept generic "person" detections as potential targets
+            # (generic YOLO might detect minions as various objects)
+            elif detection.class_name in {"person", "bird", "cat", "dog"}:
+                # Generic objects that might be game entities
+                minions.append(detection)
+
+        return minions
 
     def _reward_trading(self) -> float:
         """Reward function for trading stage"""

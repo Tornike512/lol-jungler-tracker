@@ -215,6 +215,35 @@ class RewardConfig:
     REWARD_LEVEL_UP: float = 0.5
     PENALTY_IDLE_PER_SECOND: float = -0.01
 
+    # ==========================================================================
+    # SHAPING REWARDS (guide agent toward farming behavior)
+    # These are smaller rewards that help the agent discover the main CS reward
+    # ==========================================================================
+
+    # Lane presence - reward for being in the right area of the screen
+    # In LoL, the lane is roughly in the center-bottom area during laning phase
+    REWARD_LANE_PRESENCE: float = 0.005  # Small continuous reward for being in lane
+
+    # Proximity to minions - reward for being close to enemy minions
+    REWARD_NEAR_MINIONS: float = 0.01  # Per minion within attack range
+    MINION_PROXIMITY_THRESHOLD: float = 0.3  # Normalized distance (0-1 scale)
+
+    # Targeting reward - reward for cursor being near minions
+    REWARD_CURSOR_NEAR_MINION: float = 0.005  # Mouse near a minion
+    CURSOR_TARGET_THRESHOLD: float = 0.1  # Normalized distance for "targeting"
+
+    # Attack action reward - small reward for right-clicking (attack command)
+    REWARD_ATTACK_ACTION: float = 0.002  # Encourage right-click actions
+
+    # Movement toward minions - reward for reducing distance to nearest minion
+    REWARD_APPROACH_MINION: float = 0.008  # Moving closer to minions
+
+    # Low HP minion targeting - bonus for cursor near low HP minion
+    REWARD_TARGET_LOW_HP: float = 0.02  # Targeting minion that might be last-hittable
+
+    # Screen center preference - encourage staying in playable area
+    REWARD_SCREEN_CENTER: float = 0.002  # Being in center of screen (where action is)
+
     # Stage 2: Trading
     REWARD_DAMAGE_DEALT: float = 0.02  # Per point of damage
     PENALTY_DAMAGE_TAKEN: float = -0.03
