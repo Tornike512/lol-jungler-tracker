@@ -44,26 +44,47 @@ SCREEN_CENTER_X = SCREEN_WIDTH // 2
 SCREEN_CENTER_Y = SCREEN_HEIGHT // 2
 
 # Minimap settings for 1920x1080 resolution with default HUD scale
-MINIMAP_X = 1647      # Left edge of minimap
-MINIMAP_Y = 817       # Top edge of minimap
-MINIMAP_SIZE = 267    # Width/height of minimap
+# CORRECTED based on diagnostic tool (minimap_test_4_Full_Bottom_Right.png)
+MINIMAP_X = 1585      # Left edge of actual minimap (1550 + 35 offset)
+MINIMAP_Y = 715       # Top edge of actual minimap (650 + 65 offset)
+MINIMAP_SIZE = 300    # Actual minimap square size (not the capture region)
 MAP_SIZE = 15000      # LoL map size in game units
 
-# Top lane positions (blue side) - along the top lane path
-TOP_LANE_POSITIONS = [
-    (1000, 13500),   # At fountain/base
-    (2200, 13200),   # Near inner tower
-    (3000, 12800),   # Between towers
-    (4200, 11800),   # Near outer tower
-    (5500, 10800),   # In lane (farming spot)
-    (6500, 10200),   # Pushed up
-    (7500, 9500),    # Near river
+# Top lane waypoint path (blue side) - from base to enemy tower
+# These are sequential waypoints to guide Garen through top lane
+TOP_LANE_WAYPOINTS = [
+    (1000, 13500),   # 0: Fountain spawn
+    (1500, 13200),   # 1: Base exit
+    (2200, 13200),   # 2: Near inner tower
+    (3000, 12800),   # 3: Between towers
+    (4200, 11800),   # 4: Near outer tower (lane start)
+    (5500, 10800),   # 5: Safe farming spot
+    (6500, 10200),   # 6: Pushed up
+    (7500, 9500),    # 7: Near river/enemy tower
 ]
+
+# Current waypoint tracking
+current_waypoint_index = 0
+last_waypoint_time = 0
+
+
+def get_nearest_waypoint(pos_x, pos_y):
+    """Find the nearest waypoint to current position."""
+    min_dist = float('inf')
+    nearest_idx = 0
+    for i, (wx, wy) in enumerate(TOP_LANE_WAYPOINTS):
+        dist = ((pos_x - wx)**2 + (pos_y - wy)**2)**0.5
+        if dist < min_dist:
+            min_dist = dist
+            nearest_idx = i
+    return nearest_idx, min_dist
+
 
 # Game state tracking
 last_ability_time = {'q': 0, 'w': 0, 'e': 0, 'r': 0}
 last_move_time = 0
-ABILITY_COOLDOWNS = {'q': 8, 'w': 20, 'e': 9, 'r': 120}  # Approximate cooldowns
+ABILITY_COOLDOWNS = {'q': 8, 'w': 20, 'e': 9,
+                     'r': 120}  # Approximate cooldowns
 
 
 def map_to_minimap(map_x, map_y):
@@ -78,27 +99,39 @@ def map_to_minimap(map_x, map_y):
 def move_to_position(map_x, map_y):
     """Right-click on minimap to move to position."""
     screen_x, screen_y = map_to_minimap(map_x, map_y)
-    print(f"  [DEBUG] Minimap click at ({screen_x}, {screen_y}) for map pos ({map_x}, {map_y})")
+    print(
+        f"  [DEBUG] move_to_position called: map=({map_x}, {map_y}) -> screen=({screen_x}, {screen_y})")
+    print(f"  [DEBUG] Moving mouse to minimap ({screen_x}, {screen_y})")
+    pyautogui.moveTo(screen_x, screen_y, duration=0.1)
+    print(f"  [DEBUG] Mouse now at {pyautogui.position()}")
+    print(f"  [DEBUG] RIGHT-clicking at ({screen_x}, {screen_y})")
     pyautogui.click(screen_x, screen_y, button='right')
+    print(f"  [DEBUG] Minimap click complete")
 
 
 def attack_move_click():
     """Attack-move using 'A' key + left-click."""
     # Click near Garen (center of screen) - attack-move finds nearest enemy automatically
-    click_x = SCREEN_CENTER_X + random.randint(-50, 50)
-    click_y = SCREEN_CENTER_Y + random.randint(-50, 50)
-    print(f"  [DEBUG] Attack-move at ({click_x}, {click_y})")
+    # Click AHEAD of Garen to walk towards minions while attacking
+    click_x = SCREEN_CENTER_X + random.randint(-150, 150)
+    # Can click ahead or slightly behind
+    click_y = SCREEN_CENTER_Y + random.randint(-100, 200)
 
-    # Move mouse to position first
-    pyautogui.moveTo(click_x, click_y)
-    time.sleep(0.05)
+    print(f"  [DEBUG] Attack-move: Moving mouse to ({click_x}, {click_y})")
 
-    # Press 'a' and click
-    keyboard.press('a')
-    time.sleep(0.08)
-    pyautogui.click(button='left')
+    # First move mouse to position
+    pyautogui.moveTo(click_x, click_y, duration=0.1)
+    print(f"  [DEBUG] Mouse now at {pyautogui.position()}")
+
+    # Use pyautogui hotkey for attack-move (more reliable than keyboard library for combo)
+    print(f"  [DEBUG] Pressing 'a' key...")
+    pyautogui.keyDown('a')
     time.sleep(0.05)
-    keyboard.release('a')
+    print(f"  [DEBUG] Clicking LEFT at ({click_x}, {click_y})")
+    pyautogui.click(click_x, click_y, button='left')
+    print(f"  [DEBUG] Releasing 'a' key...")
+    pyautogui.keyUp('a')
+    print(f"  [DEBUG] Attack-move complete")
     time.sleep(0.1)
 
 
@@ -111,17 +144,26 @@ def right_click_attack():
 
 
 def use_ability(key):
-    """Press an ability key using keyboard library."""
+    """Press an ability key using pyautogui for better game compatibility."""
     current_time = time.time()
     time_since_last = current_time - last_ability_time.get(key, 0)
     cooldown = ABILITY_COOLDOWNS.get(key, 0)
+    print(
+        f"  [DEBUG] use_ability('{key}') called. Time since last: {time_since_last:.1f}s, cooldown: {cooldown}s")
+
     if time_since_last > cooldown:
-        print(f"  [DEBUG] Pressing ability '{key}'")
-        keyboard.press_and_release(key)
+        print(f"  [DEBUG] --> Ability '{key}' is READY, sending keypress")
+        print(f"  [DEBUG] --> pyautogui.keyDown('{key}')")
+        pyautogui.keyDown(key)
+        time.sleep(0.05)
+        print(f"  [DEBUG] --> pyautogui.keyUp('{key}')")
+        pyautogui.keyUp(key)
         last_ability_time[key] = current_time
+        print(f"  [DEBUG] --> Ability '{key}' used successfully!")
         return True
     else:
-        print(f"  [DEBUG] Ability '{key}' on cooldown ({time_since_last:.1f}s / {cooldown}s)")
+        print(
+            f"  [DEBUG] --> Ability '{key}' on cooldown ({time_since_last:.1f}s / {cooldown}s)")
     return False
 
 
@@ -281,11 +323,40 @@ def main():
             # Extract state with actual position
             state = extract_game_state(game_data, garen, (pos_x, pos_y))
 
-            # Use the trained model to predict where to go
-            prediction = predictor.predict_position(state)
-            target_x = prediction['x']
-            target_y = prediction['y']
-            location = prediction['description']
+            # BLUE SIDE: Spawn is at bottom-left (1000, 13500)
+            # Need to walk UP to top lane (y decreases as we go up on map)
+            # Top lane is at y > 9000
+
+            # Find nearest waypoint
+            nearest_idx, dist_to_nearest = get_nearest_waypoint(pos_x, pos_y)
+            print(
+                f"  [DEBUG] Nearest waypoint: WP{nearest_idx}, dist={dist_to_nearest:.0f}")
+
+            # Update waypoint index if we've reached current target
+            if dist_to_nearest < 500:
+                global current_waypoint_index
+                current_waypoint_index = min(
+                    nearest_idx + 1, len(TOP_LANE_WAYPOINTS) - 1)
+                print(f"  [DEBUG] Advanced to WP{current_waypoint_index}")
+
+            # Determine target based on game state
+            level = state['level']
+            game_time = state['game_time']
+
+            if game_time < 60:
+                # First minute: follow waypoints from spawn to lane
+                target_idx = current_waypoint_index
+            elif level <= 5:
+                target_idx = 5  # Safe farming
+            elif level <= 10:
+                target_idx = 6  # Pushed up
+            else:
+                target_idx = 7  # Near enemy tower
+
+            target_x, target_y = TOP_LANE_WAYPOINTS[target_idx]
+            location = f"Top Lane WP{target_idx}"
+            print(
+                f"  [DEBUG] Target set to WP{target_idx}: ({target_x}, {target_y})")
 
             # Display
             game_time = state['game_time']
@@ -294,7 +365,8 @@ def main():
 
             detected = "OK" if minimap_pixel else "EST"
             print(f"[{minutes:02d}:{seconds:02d}] Lvl {state['level']} | CS {state['minions_killed']} | Pos: ({pos_x}, {pos_y}) [{detected}]")
-            print(f"  >> Model says go to: {location} ({target_x}, {target_y})")
+            print(
+                f"  >> Model says go to: {location} ({target_x}, {target_y})")
 
             # Game logic based on state
             if garen.get('isDead', False):
@@ -302,28 +374,78 @@ def main():
                 time.sleep(1)
                 continue
 
-            # Move to lane via minimap every few seconds (not every tick)
+            # Calculate distance to target
+            dist_to_target = ((pos_x - target_x)**2 +
+                              (pos_y - target_y)**2)**0.5
+            print(
+                f"  [DEBUG] Distance to target WP{target_idx}: {dist_to_target:.0f} units")
+            print(
+                f"  [DEBUG] Current pos: ({pos_x}, {pos_y}), Target: ({target_x}, {target_y})")
+
+            # Move to lane via minimap - more frequent clicks when far away
             current_time = time.time()
             global last_move_time
-            if current_time - last_move_time > 3:  # Move command every 3 seconds
-                move_to_position(target_x, target_y)
-                last_move_time = current_time
+            time_since_last_move = current_time - last_move_time
+            print(
+                f"  [DEBUG] Time since last move: {time_since_last_move:.1f}s")
 
-            # Farm minions - single action per tick with longer delay
-            farm_minions()
-            time.sleep(0.3)  # Give time for action to register
+            # Move more frequently when far from target
+            move_delay = 2.0 if dist_to_target > 3000 else 5.0
+            print(f"  [DEBUG] Move delay threshold: {move_delay}s")
 
-            # Use E (spin) for wave clear - use it often
-            if random.random() < 0.4:  # 40% chance each tick
-                if use_ability('e'):
-                    print("  >> Used E (Spin)")
+            if time_since_last_move > move_delay:
+                print(
+                    f"  [DEBUG] Move timer expired, checking if we should move...")
+                if dist_to_target > 500:  # Move if more than 500 units away
+                    print(
+                        f"  [DEBUG] YES - Moving to WP{target_idx} (dist: {dist_to_target:.0f} > 500)")
+                    move_to_position(target_x, target_y)
+                    last_move_time = current_time
+                else:
+                    print(
+                        f"  [DEBUG] NO - Already close enough (dist: {dist_to_target:.0f} <= 500)")
+                    last_move_time = current_time
+            else:
+                print(
+                    f"  [DEBUG] Move timer not expired yet ({time_since_last_move:.1f}s < {move_delay}s)")
 
-            # Use Q for extra damage / movement
-            if random.random() < 0.2:  # 20% chance
-                if use_ability('q'):
-                    print("  >> Used Q")
+            # Farm minions - attack-move multiple times to ensure minion aggro
+            # Farm if we're close enough to target (in lane)
+            in_top_lane = pos_y > 8000 and 1000 < pos_x < 9000
+            should_farm = dist_to_target < 1500 or in_top_lane
+            print(
+                f"  [DEBUG] Farming check: in_top_lane={in_top_lane}, should_farm={should_farm}")
 
-            last_prediction = prediction
+            if should_farm:
+                if dist_to_target < 1500:
+                    print(
+                        f"  >> Farming at target (dist: {dist_to_target:.0f})")
+                else:
+                    print(f"  >> Farming in top lane area")
+                for i in range(4):  # Multiple attack-moves per cycle
+                    print(f"  [DEBUG] Farming iteration {i+1}/4")
+                    farm_minions()
+                    time.sleep(0.15)
+
+                # Use E (spin) for wave clear - use it often when in lane
+                rand_e = random.random()
+                print(f"  [DEBUG] E chance: {rand_e:.2f} (need < 0.7)")
+                if rand_e < 0.7:  # 70% chance each tick
+                    if use_ability('e'):
+                        print("  >> Used E (Spin)")
+                        time.sleep(0.4)  # Let E channel for a bit
+
+                # Use Q for extra damage / movement
+                rand_q = random.random()
+                print(f"  [DEBUG] Q chance: {rand_q:.2f} (need < 0.4)")
+                if rand_q < 0.4:  # 40% chance
+                    if use_ability('q'):
+                        print("  >> Used Q")
+            else:
+                print(
+                    f"  >> Too far from target (dist: {dist_to_target:.0f}), skipping farm...")
+
+            last_prediction = {'x': target_x, 'y': target_y}
             time.sleep(0.2)  # Faster update rate
 
     except KeyboardInterrupt:

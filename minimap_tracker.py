@@ -9,10 +9,18 @@ import numpy as np
 import time
 
 # Minimap settings for 1920x1080 resolution with default HUD scale
-MINIMAP_LEFT = 1647
-MINIMAP_TOP = 817
-MINIMAP_SIZE = 267
+# CORRECTED coordinates based on diagnostic tool
+MINIMAP_LEFT = 1550
+MINIMAP_TOP = 650
+MINIMAP_SIZE = 370
 MAP_GAME_SIZE = 15000  # League map size in game units
+
+# Note: The actual minimap square is smaller than the capture region
+# We need to find the actual minimap bounds within this region
+# The minimap appears to be roughly 300x300 pixels within the 370x430 capture
+MINIMAP_INNER_OFFSET_X = 35  # Offset to actual minimap left edge
+MINIMAP_INNER_OFFSET_Y = 65  # Offset to actual minimap top edge
+MINIMAP_INNER_SIZE = 300     # Actual minimap square size
 
 # Colors for detection (BGR format for OpenCV)
 # The player indicator has a cyan/white border
@@ -28,23 +36,32 @@ class MinimapTracker:
     def __init__(self, minimap_left=MINIMAP_LEFT, minimap_top=MINIMAP_TOP,
                  minimap_size=MINIMAP_SIZE):
         self.sct = mss.mss()
-        self.minimap_region = {
+        # Capture a larger region that includes the minimap frame
+        self.capture_region = {
             "left": minimap_left,
             "top": minimap_top,
             "width": minimap_size,
-            "height": minimap_size
+            "height": int(minimap_size * 1.16)  # 370x430 aspect ratio
         }
-        self.minimap_size = minimap_size
+        # The actual minimap square is smaller and offset within the capture
+        self.minimap_offset_x = MINIMAP_INNER_OFFSET_X
+        self.minimap_offset_y = MINIMAP_INNER_OFFSET_Y
+        self.minimap_size = MINIMAP_INNER_SIZE
         self.last_position = None
+        print(f"[MinimapTracker] Capture region: {self.capture_region}")
+        print(
+            f"[MinimapTracker] Inner minimap: offset=({self.minimap_offset_x}, {self.minimap_offset_y}), size={self.minimap_size}")
 
     def capture_minimap(self):
         """Capture the minimap region of the screen."""
-        screenshot = self.sct.grab(self.minimap_region)
-        # Convert to numpy array (BGRA format)
+        screenshot = self.sct.grab(self.capture_region)
+        # Convert to numpy array
         img = np.array(screenshot)
-        # Convert BGRA to BGR
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        return img
+        # Crop to the actual minimap square (remove the frame/border)
+        cropped = img[self.minimap_offset_y:self.minimap_offset_y + self.minimap_size,
+                      self.minimap_offset_x:self.minimap_offset_x + self.minimap_size]
+        return cropped
 
     def find_player_position(self, img):
         """
@@ -60,17 +77,22 @@ class MinimapTracker:
         cyan_mask = cv2.inRange(hsv, lower_cyan, upper_cyan)
 
         # Find contours in cyan mask
-        contours, _ = cv2.findContours(cyan_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(
+            cyan_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if contours:
             # Filter by size - player indicator is medium-sized
-            valid_contours = [c for c in contours if 20 < cv2.contourArea(c) < 500]
+            valid_contours = [c for c in contours if 20 <
+                              cv2.contourArea(c) < 500]
             if valid_contours:
                 # Get the one closest to where we expect player to be
                 # (prioritize consistency with last position)
                 if self.last_position:
-                    last_minimap_x = (self.last_position[0] / MAP_GAME_SIZE) * self.minimap_size
-                    last_minimap_y = self.minimap_size - (self.last_position[1] / MAP_GAME_SIZE) * self.minimap_size
+                    last_minimap_x = (
+                        self.last_position[0] / MAP_GAME_SIZE) * self.minimap_size
+                    last_minimap_y = self.minimap_size - \
+                        (self.last_position[1] /
+                         MAP_GAME_SIZE) * self.minimap_size
 
                     def distance_to_last(contour):
                         M = cv2.moments(contour)
@@ -95,10 +117,12 @@ class MinimapTracker:
         upper_blue = np.array([130, 255, 255])
         blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-        contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(
+            blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if contours:
-            valid_contours = [c for c in contours if 30 < cv2.contourArea(c) < 600]
+            valid_contours = [c for c in contours if 30 <
+                              cv2.contourArea(c) < 600]
             if valid_contours:
                 # Get largest blue blob (likely player icon)
                 largest = max(valid_contours, key=cv2.contourArea)
@@ -112,7 +136,8 @@ class MinimapTracker:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, white_thresh = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
 
-        contours, _ = cv2.findContours(white_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(
+            white_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if contours:
             # Find circular contours (player indicator is round)
@@ -121,7 +146,8 @@ class MinimapTracker:
                 if 30 < area < 400:
                     perimeter = cv2.arcLength(contour, True)
                     if perimeter > 0:
-                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                        circularity = 4 * np.pi * \
+                            area / (perimeter * perimeter)
                         if circularity > 0.4:
                             M = cv2.moments(contour)
                             if M["m00"] > 0:
@@ -136,7 +162,8 @@ class MinimapTracker:
         # Minimap (0,0) is top-left which corresponds to top-left of game map
         # In League, (0,0) is bottom-left, so we need to flip Y
         game_x = (minimap_x / self.minimap_size) * MAP_GAME_SIZE
-        game_y = ((self.minimap_size - minimap_y) / self.minimap_size) * MAP_GAME_SIZE
+        game_y = ((self.minimap_size - minimap_y) /
+                  self.minimap_size) * MAP_GAME_SIZE
         return int(game_x), int(game_y)
 
     def get_player_position(self):
@@ -145,7 +172,8 @@ class MinimapTracker:
         minimap_pos = self.find_player_position(img)
 
         if minimap_pos:
-            game_x, game_y = self.minimap_to_game_coords(minimap_pos[0], minimap_pos[1])
+            game_x, game_y = self.minimap_to_game_coords(
+                minimap_pos[0], minimap_pos[1])
 
             # Validate: if position jumped too far (>3000 units), likely bad detection
             # Champions can't teleport that far in 1 second normally
@@ -178,7 +206,8 @@ class MinimapTracker:
         cyan_mask = cv2.inRange(hsv, lower_cyan, upper_cyan)
 
         # Draw all cyan contours in yellow
-        contours, _ = cv2.findContours(cyan_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(
+            cyan_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(debug_img, contours, -1, (0, 255, 255), 1)
 
         # Find and mark player position
@@ -188,12 +217,13 @@ class MinimapTracker:
             # Draw circle at detected position
             cv2.circle(debug_img, minimap_pos, 12, (0, 255, 0), 2)
             cv2.circle(debug_img, minimap_pos, 3, (0, 255, 0), -1)
-            game_x, game_y = self.minimap_to_game_coords(minimap_pos[0], minimap_pos[1])
+            game_x, game_y = self.minimap_to_game_coords(
+                minimap_pos[0], minimap_pos[1])
             cv2.putText(debug_img, f"({game_x}, {game_y})", (10, 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
         else:
             cv2.putText(debug_img, "Position not found", (10, 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
         cv2.imwrite(save_path, debug_img)
 
@@ -224,9 +254,11 @@ def test_tracker():
             game_x, game_y, minimap_pos = tracker.get_player_position()
 
             if minimap_pos:
-                print(f"Position: ({game_x:5d}, {game_y:5d}) | Minimap pixel: {minimap_pos}", end='\r')
+                print(
+                    f"Position: ({game_x:5d}, {game_y:5d}) | Minimap pixel: {minimap_pos}", end='\r')
             else:
-                print(f"Position: ({game_x:5d}, {game_y:5d}) | Detection failed, using last known", end='\r')
+                print(
+                    f"Position: ({game_x:5d}, {game_y:5d}) | Detection failed, using last known", end='\r')
 
             time.sleep(0.1)
 

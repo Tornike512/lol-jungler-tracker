@@ -46,7 +46,8 @@ class GarenPredictor:
         print("[*] Creating model architecture...")
         self.model = GarenNet(input_size=19)
         print("[*] Loading model weights...")
-        self.model.load_state_dict(torch.load(MODEL_FILE, weights_only=True, map_location='cpu'))
+        self.model.load_state_dict(torch.load(
+            MODEL_FILE, weights_only=True, map_location='cpu'))
         self.model.eval()
         print("[*] Model loaded!")
 
@@ -114,8 +115,10 @@ class GarenPredictor:
 
         # Derived features
         game_progress = game_time / game_duration if game_duration > 0 else 0
-        gold_per_min = total_gold / (game_time / 60 + 1) if game_time > 0 else 0
-        cs_per_min = minions_killed / (game_time / 60 + 1) if game_time > 0 else 0
+        gold_per_min = total_gold / \
+            (game_time / 60 + 1) if game_time > 0 else 0
+        cs_per_min = minions_killed / \
+            (game_time / 60 + 1) if game_time > 0 else 0
         damage_ratio = damage_done / (damage_taken + 1)
         in_blue_side = 1 if x < 7500 else 0
         in_top_half = 1 if y > 7500 else 0
@@ -152,26 +155,30 @@ class GarenPredictor:
 
     def _describe_position(self, x, y):
         """Describe the position in game terms."""
-        # Map regions (approximate)
-        if x < 5000:
-            if y < 5000:
+        # Map regions (approximate) - fixed for top lane focus
+        if x < 4000:
+            if y < 4000:
                 return "Blue side bot jungle"
-            elif y > 10000:
-                return "Blue side top jungle"
+            elif y > 11000:
+                return "Blue base/fountain"
             else:
-                return "Blue side mid jungle"
-        elif x > 10000:
-            if y < 5000:
+                return "Blue side jungle"
+        elif x > 11000:
+            if y < 4000:
                 return "Red side bot jungle"
-            elif y > 10000:
+            elif y > 11000:
                 return "Red side top jungle"
             else:
-                return "Red side mid jungle"
+                return "Red side jungle"
         else:
-            if y < 4000:
+            if y < 3000:
                 return "Bot lane"
-            elif y > 11000:
+            elif y > 12000:
+                return "Top lane (pushed)"
+            elif y > 9000:
                 return "Top lane"
+            elif y > 6000:
+                return "Mid/river area"
             else:
                 return "Mid lane area"
 
@@ -203,7 +210,8 @@ def demo():
     print("\n[Early Game - Level 3, 5 minutes]")
     print(f"  Current: Top lane blue side (2000, 12000)")
     result = predictor.predict_position(early_game)
-    print(f"  Predicted: ({result['x']}, {result['y']}) - {result['description']}")
+    print(
+        f"  Predicted: ({result['x']}, {result['y']}) - {result['description']}")
 
     # Mid game (roaming)
     mid_game = {
@@ -224,7 +232,8 @@ def demo():
     print("\n[Mid Game - Level 11, 20 minutes, WINNING]")
     print(f"  Current: Mid area (7500, 7500)")
     result = predictor.predict_position(mid_game)
-    print(f"  Predicted: ({result['x']}, {result['y']}) - {result['description']}")
+    print(
+        f"  Predicted: ({result['x']}, {result['y']}) - {result['description']}")
 
     # Late game (teamfight)
     late_game = {
@@ -245,7 +254,8 @@ def demo():
     print("\n[Late Game - Level 16, 30 minutes, LOSING]")
     print(f"  Current: Near enemy base (10000, 8000)")
     result = predictor.predict_position(late_game)
-    print(f"  Predicted: ({result['x']}, {result['y']}) - {result['description']}")
+    print(
+        f"  Predicted: ({result['x']}, {result['y']}) - {result['description']}")
 
 
 if __name__ == "__main__":
