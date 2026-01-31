@@ -315,6 +315,10 @@ class InputController:
 
     def _set_mouse_position(self, x: int, y: int):
         """Set mouse position (platform-specific)"""
+        # Ensure we have Python ints, not numpy types
+        x = int(x)
+        y = int(y)
+
         if self.platform == "Linux":
             self.mouse.position = (x, y)
         elif self.platform == "Windows":
@@ -505,9 +509,9 @@ class InputController:
         target_x = current_x + int(mouse_x_norm * max_move)
         target_y = current_y + int(mouse_y_norm * max_move)
 
-        # Clamp to screen bounds
-        target_x = np.clip(target_x, 0, screen_width - 1)
-        target_y = np.clip(target_y, 0, screen_height - 1)
+        # Clamp to screen bounds and convert to Python int
+        target_x = int(np.clip(target_x, 0, screen_width - 1))
+        target_y = int(np.clip(target_y, 0, screen_height - 1))
 
         self.move_mouse_to(target_x, target_y)
 
