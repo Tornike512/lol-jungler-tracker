@@ -134,6 +134,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--no-yolo",
+        action="store_true",
+        help="Disable YOLO detection (faster training)"
+    )
+
+    parser.add_argument(
         "--total-timesteps",
         type=int,
         default=None,
@@ -188,7 +194,7 @@ def main():
     env = GarenEnvironment(
         curriculum_stage=args.stage,
         headless=args.headless,
-        use_yolo=True
+        use_yolo=not args.no_yolo
     )
 
     # Create agent

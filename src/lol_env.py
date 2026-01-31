@@ -15,6 +15,13 @@ from .vision import VisionPipeline, GameState
 from .input_controller import InputController
 from .cs_detector import CSDetector
 
+# Try to import Live Client API (preferred over OCR)
+try:
+    from .live_client_api import LiveClientCSDetector, LiveClientAPI
+    LIVE_CLIENT_AVAILABLE = True
+except ImportError:
+    LIVE_CLIENT_AVAILABLE = False
+
 # Global kill switch flag
 _kill_switch_pressed = False
 _kill_switch_listener = None
@@ -120,11 +127,35 @@ class LoLEnvironment(gym.Env):
                 print("Running in observation-only mode")
 
         # CS detector for reward calculation
-        self.cs_detector = CSDetector(
-            screen_width=capture_cfg.SCREEN_WIDTH,
-            screen_height=capture_cfg.SCREEN_HEIGHT,
-            update_interval=0.5  # Update every 0.5 seconds
-        )
+        # Prefer Live Client API over OCR (faster, more accurate)
+        self.use_live_client = False
+        if LIVE_CLIENT_AVAILABLE:
+            try:
+                self.cs_detector = LiveClientCSDetector()
+                # Check if API is actually available (game running)
+                if LiveClientAPI().is_game_running():
+                    self.use_live_client = True
+                    print("Using Live Client API for CS detection (fast & accurate)")
+                else:
+                    print("Live Client API not available (no game running), falling back to OCR")
+                    self.cs_detector = CSDetector(
+                        screen_width=capture_cfg.SCREEN_WIDTH,
+                        screen_height=capture_cfg.SCREEN_HEIGHT,
+                        update_interval=0.5
+                    )
+            except Exception as e:
+                print(f"Live Client API failed: {e}, falling back to OCR")
+                self.cs_detector = CSDetector(
+                    screen_width=capture_cfg.SCREEN_WIDTH,
+                    screen_height=capture_cfg.SCREEN_HEIGHT,
+                    update_interval=0.5
+                )
+        else:
+            self.cs_detector = CSDetector(
+                screen_width=capture_cfg.SCREEN_WIDTH,
+                screen_height=capture_cfg.SCREEN_HEIGHT,
+                update_interval=0.5  # Update every 0.5 seconds
+            )
         self.last_cs_reward_cs = 0  # Track CS for reward calculation
 
         # Shaping reward tracking

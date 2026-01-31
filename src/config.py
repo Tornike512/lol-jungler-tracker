@@ -189,10 +189,11 @@ class ActionConfig:
     STD_REACTION_TIME_MS: float = 15.0   # Reduced for training speed
 
     # Mouse movement settings
-    USE_BEZIER_CURVES: bool = True
+    # NOTE: Disable Bezier curves for faster training, enable for human-like inference
+    USE_BEZIER_CURVES: bool = False  # Disabled for training speed
     BEZIER_CONTROL_POINTS: int = 4
-    MOUSE_SPEED_MIN: float = 0.5  # pixels per ms
-    MOUSE_SPEED_MAX: float = 3.0
+    MOUSE_SPEED_MIN: float = 2.0  # Faster for training
+    MOUSE_SPEED_MAX: float = 5.0  # Faster for training
 
     # APM (Actions Per Minute) limits
     MIN_APM: int = 80
