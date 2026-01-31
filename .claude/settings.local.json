@@ -8,7 +8,18 @@
       "Bash(tasklist:*)",
       "Bash(taskkill:*)",
       "Bash(git commit:*)",
-      "Skill(ralph-loop:ralph-loop)"
+      "Skill(ralph-loop:ralph-loop)",
+      "Bash(pip show:*)",
+      "WebSearch",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(dir /s /b \"C:\\\\Users\\\\User\\\\Documents\\\\League of Legends\\\\Replays\\\\*.rofl\")",
+      "Bash(dir /s /b \"C:\\\\Users\\\\User\\\\Desktop\\\\*.rofl\")",
+      "Bash(dir /s /b \"C:\\\\Users\\\\User\\\\Downloads\\\\*.rofl\")",
+      "Bash(dir /s /b \"C:\\\\Users\\\\User\\\\*.rofl\")",
+      "Bash(dir:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(./ROFL.exe:*)"
     ]
   }
 }
