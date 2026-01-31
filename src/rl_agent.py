@@ -432,22 +432,28 @@ class PPOAgent:
             "n_updates": self.n_updates
         }
 
-    def save(self, path: str):
-        """Save model checkpoint"""
-        torch.save({
+    def save(self, path: str, training_state: dict = None):
+        """Save model checkpoint with optional training state"""
+        checkpoint = {
             "policy_state_dict": self.policy.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "n_updates": self.n_updates,
-        }, path)
+        }
+        # Include training state if provided (timesteps, episodes, etc.)
+        if training_state:
+            checkpoint["training_state"] = training_state
+        torch.save(checkpoint, path)
         print(f"Model saved to {path}")
 
-    def load(self, path: str):
-        """Load model checkpoint"""
+    def load(self, path: str) -> dict:
+        """Load model checkpoint and return training state if available"""
         checkpoint = torch.load(path, map_location=self.device)
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.n_updates = checkpoint["n_updates"]
+        self.n_updates = checkpoint.get("n_updates", 0)
         print(f"Model loaded from {path}")
+        # Return training state if it exists
+        return checkpoint.get("training_state", {})
 
 
 # ============================================================================

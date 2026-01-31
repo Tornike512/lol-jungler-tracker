@@ -182,9 +182,11 @@ class ActionConfig:
     ACTION_DIM_DISCRETE_KEYBOARD: int = 21  # number of keyboard options
 
     # Input timing and humanization
-    MIN_REACTION_TIME_MS: float = 150.0
-    AVG_REACTION_TIME_MS: float = 220.0
-    STD_REACTION_TIME_MS: float = 40.0
+    # NOTE: For faster training, set MIN_REACTION_TIME_MS to 20-50ms
+    # For human-like play (inference), use 150ms+
+    MIN_REACTION_TIME_MS: float = 30.0   # Reduced for training speed
+    AVG_REACTION_TIME_MS: float = 50.0   # Reduced for training speed
+    STD_REACTION_TIME_MS: float = 15.0   # Reduced for training speed
 
     # Mouse movement settings
     USE_BEZIER_CURVES: bool = True
@@ -294,7 +296,8 @@ class SafetyConfig:
     USE_RANDOM_APM_VARIATION: bool = True
 
     # Never use sub-human reaction times
-    ENFORCE_MIN_REACTION_TIME: bool = True
+    # Set to False during training for faster iterations
+    ENFORCE_MIN_REACTION_TIME: bool = False  # Disabled for training speed
 
     # Session management
     MAX_GAME_DURATION_MINUTES: int = 60

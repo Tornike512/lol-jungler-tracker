@@ -279,7 +279,7 @@ class Trainer:
         print()
 
     def _save_checkpoint(self, best: bool = False, final: bool = False):
-        """Save model checkpoint"""
+        """Save model checkpoint with training state"""
         if best:
             path = self.checkpoint_dir / "best_model.pt"
             print(f"Saving best model to {path}")
@@ -290,7 +290,21 @@ class Trainer:
             path = self.checkpoint_dir / f"checkpoint_{self.timesteps_done}.pt"
             print(f"Saving checkpoint to {path}")
 
-        self.agent.save(str(path))
+        # Include training state so we can resume properly
+        training_state = {
+            "timesteps_done": self.timesteps_done,
+            "episodes_done": self.episodes_done,
+            "best_reward": self.best_reward,
+        }
+        self.agent.save(str(path), training_state=training_state)
+
+    def load_training_state(self, training_state: dict):
+        """Restore training state from checkpoint"""
+        if training_state:
+            self.timesteps_done = training_state.get("timesteps_done", 0)
+            self.episodes_done = training_state.get("episodes_done", 0)
+            self.best_reward = training_state.get("best_reward", -float("inf"))
+            print(f"Restored training state: {self.timesteps_done:,} timesteps, {self.episodes_done} episodes")
 
 
 def parse_args():
@@ -416,9 +430,11 @@ def main():
         if resume_path:
             print(f"Auto-detected latest checkpoint: {resume_path}")
 
+    # Load checkpoint if available
+    training_state = {}
     if resume_path:
         print(f"Resuming from checkpoint: {resume_path}")
-        agent.load(resume_path)
+        training_state = agent.load(resume_path)
 
     # Create trainer
     trainer = Trainer(
@@ -427,6 +443,10 @@ def main():
         total_timesteps=args.total_timesteps,
         checkpoint_dir=args.checkpoint_dir
     )
+
+    # Restore training state (timesteps, episodes, best_reward)
+    if training_state:
+        trainer.load_training_state(training_state)
 
     # Start training
     try:

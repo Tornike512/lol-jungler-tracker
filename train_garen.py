@@ -201,9 +201,11 @@ def main():
         if resume_path:
             print(f"Auto-detected latest checkpoint: {resume_path}")
 
+    # Load checkpoint and get training state
+    training_state = {}
     if resume_path:
         print(f"Resuming from checkpoint: {resume_path}")
-        agent.load(resume_path)
+        training_state = agent.load(resume_path)
 
     # Demo mode (quick test)
     if args.demo:
@@ -235,6 +237,10 @@ def main():
         total_timesteps=total_steps,
         checkpoint_dir=args.checkpoint_dir
     )
+
+    # Restore training state (timesteps, episodes, best_reward)
+    if training_state:
+        trainer.load_training_state(training_state)
 
     # Start training
     print("\n🚀 Starting Garen training...")
