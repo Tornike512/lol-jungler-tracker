@@ -19,7 +19,8 @@
       "Bash(dir /s /b \"C:\\\\Users\\\\User\\\\*.rofl\")",
       "Bash(dir:*)",
       "Bash(powershell -Command:*)",
-      "Bash(./ROFL.exe:*)"
+      "Bash(./ROFL.exe:*)",
+      "WebFetch(domain:www.leagueofgraphs.com)"
     ]
   }
 }
