@@ -13,6 +13,7 @@ import pyautogui
 import keyboard
 
 from garen_predict import GarenPredictor
+from minimap_tracker import MinimapTracker
 
 # Global flag for stopping
 stop_flag = False
@@ -77,44 +78,57 @@ def map_to_minimap(map_x, map_y):
 def move_to_position(map_x, map_y):
     """Right-click on minimap to move to position."""
     screen_x, screen_y = map_to_minimap(map_x, map_y)
+    print(f"  [DEBUG] Minimap click at ({screen_x}, {screen_y}) for map pos ({map_x}, {map_y})")
     pyautogui.click(screen_x, screen_y, button='right')
 
 
 def attack_move_click():
-    """Press A then left-click to attack-move (attacks nearest enemy)."""
-    # Press A key to enter attack-move mode
-    pyautogui.press('a')
+    """Attack-move using 'A' key + left-click."""
+    # Click near Garen (center of screen) - attack-move finds nearest enemy automatically
+    click_x = SCREEN_CENTER_X + random.randint(-50, 50)
+    click_y = SCREEN_CENTER_Y + random.randint(-50, 50)
+    print(f"  [DEBUG] Attack-move at ({click_x}, {click_y})")
+
+    # Move mouse to position first
+    pyautogui.moveTo(click_x, click_y)
     time.sleep(0.05)
-    # Click near center-top of screen (towards enemy minions in top lane)
-    click_x = SCREEN_CENTER_X + random.randint(-200, 200)
-    click_y = SCREEN_CENTER_Y + random.randint(-200, 0)  # Upper half (towards enemy)
-    pyautogui.click(click_x, click_y, button='left')
+
+    # Press 'a' and click
+    keyboard.press('a')
+    time.sleep(0.08)
+    pyautogui.click(button='left')
+    time.sleep(0.05)
+    keyboard.release('a')
+    time.sleep(0.1)
 
 
 def right_click_attack():
     """Right-click ahead to move/attack."""
     click_x = SCREEN_CENTER_X + random.randint(-150, 150)
     click_y = SCREEN_CENTER_Y + random.randint(-200, -50)  # Move towards enemy
+    print(f"  [DEBUG] Move/attack RIGHT click at ({click_x}, {click_y})")
     pyautogui.click(click_x, click_y, button='right')
 
 
 def use_ability(key):
-    """Press an ability key."""
+    """Press an ability key using keyboard library."""
     current_time = time.time()
-    if current_time - last_ability_time.get(key, 0) > ABILITY_COOLDOWNS.get(key, 0):
-        pyautogui.press(key)
+    time_since_last = current_time - last_ability_time.get(key, 0)
+    cooldown = ABILITY_COOLDOWNS.get(key, 0)
+    if time_since_last > cooldown:
+        print(f"  [DEBUG] Pressing ability '{key}'")
+        keyboard.press_and_release(key)
         last_ability_time[key] = current_time
         return True
+    else:
+        print(f"  [DEBUG] Ability '{key}' on cooldown ({time_since_last:.1f}s / {cooldown}s)")
     return False
 
 
 def farm_minions():
-    """Farm minions by attack-moving and right-clicking."""
-    # Alternate between attack-move and right-click
-    if random.random() < 0.5:
-        attack_move_click()
-    else:
-        right_click_attack()
+    """Farm minions by attack-moving."""
+    # Always use attack-move for farming
+    attack_move_click()
 
 
 def get_lane_position(game_time, level):
@@ -155,21 +169,16 @@ def find_garen(game_data):
     return None
 
 
-def extract_game_state(game_data, garen_data):
+def extract_game_state(game_data, garen_data, position):
     """Extract game state for the AI model."""
     stats = garen_data.get('championStats', {})
     scores = garen_data.get('scores', {})
 
-    # Position might be in different locations in the API response
-    # Check activePlayer first (has position for local player)
-    active_player = game_data.get('activePlayer', {})
-    pos = active_player.get('position', {})
-
-    # If position is not a dict, try to parse or use defaults
-    if not isinstance(pos, dict):
-        pos = {}
-
     game_time = game_data.get('gameData', {}).get('gameTime', 0)
+    level = garen_data.get('level', 1)
+
+    # Position from screen capture
+    est_x, est_y = position
 
     # Determine if winning (compare team gold/kills)
     my_team = garen_data.get('team', 'ORDER')
@@ -184,12 +193,12 @@ def extract_game_state(game_data, garen_data):
     win = 1 if team_kills > enemy_kills else 0
 
     return {
-        'x': pos.get('x', 7500),
-        'y': pos.get('y', 7500),
-        'level': garen_data.get('level', 1),
+        'x': est_x,
+        'y': est_y,
+        'level': level,
         'current_gold': scores.get('currentGold', 0),
         'total_gold': scores.get('currentGold', 0) * 2,  # Estimate
-        'xp': garen_data.get('level', 1) * 500,  # Estimate
+        'xp': level * 500,  # Estimate
         'minions_killed': scores.get('creepScore', 0),
         'jungle_minions': 0,
         'damage_done': stats.get('physicalDamageDealtToChampions', 0),
@@ -207,25 +216,36 @@ def main():
     print("=" * 60)
     print("\nStart a game as Garen (Practice Tool, Blue Side)")
     print("\nThe AI will:")
-    print("  - Go to Top Lane")
+    print("  - DETECT position from minimap (screen capture)")
+    print("  - Use TRAINED MODEL to decide where to go")
     print("  - Farm minions (attack-move)")
-    print("  - Use E (spin) for wave clear")
-    print("  - Use Q for movement speed")
+    print("  - Use abilities (E, Q)")
     print("\nControls:")
     print("  - F12 = Stop the script")
     print("  - Move mouse to top-left corner = Emergency stop")
     print("  - Ctrl+C = Stop the script")
     print("\nMake sure League is in BORDERLESS or WINDOWED mode!")
+    print("\nIMPORTANT:")
+    print("  - Uses A + LeftClick for attack-move (default keybind)")
+    print("  - Make sure League window is FOCUSED when script runs!")
+    print("  - Run this script as Administrator if inputs don't work")
     print("=" * 60)
 
     predictor = GarenPredictor()
+    tracker = MinimapTracker()
+    print("[+] Minimap tracker initialized")
 
-    print("\nWaiting for game...")
-    print("(Switch to League window now!)\n")
+    print("\n[TEST] Saving minimap debug image...")
+    tracker.debug_capture("minimap_debug.png")
+    print("[TEST] Check 'minimap_debug.png' to verify position detection!")
+    print("[TEST] Green circle = detected position\n")
 
-    # 5 second countdown before starting
+    print("Waiting for game...")
+    print("(Keep League window focused!)\n")
+
+    # 3 second countdown before starting
     print("Starting in:")
-    for i in range(5, 0, -1):
+    for i in range(3, 0, -1):
         print(f"  {i}...")
         time.sleep(1)
     print("  GO!\n")
@@ -255,19 +275,26 @@ def main():
                 print("[INFO] Starting in 3 seconds...\n")
                 time.sleep(3)
 
-            # Extract state
-            state = extract_game_state(game_data, garen)
-            prediction = {'x': 0, 'y': 0}  # Not using model predictions anymore
+            # Get position from screen capture
+            pos_x, pos_y, minimap_pixel = tracker.get_player_position()
+
+            # Extract state with actual position
+            state = extract_game_state(game_data, garen, (pos_x, pos_y))
+
+            # Use the trained model to predict where to go
+            prediction = predictor.predict_position(state)
+            target_x = prediction['x']
+            target_y = prediction['y']
+            location = prediction['description']
 
             # Display
             game_time = state['game_time']
             minutes = int(game_time // 60)
             seconds = int(game_time % 60)
 
-            # Get lane position (always top lane)
-            target_x, target_y = get_lane_position(game_time, state['level'])
-
-            print(f"[{minutes:02d}:{seconds:02d}] Lvl {state['level']} | CS {state['minions_killed']} | Top Lane")
+            detected = "OK" if minimap_pixel else "EST"
+            print(f"[{minutes:02d}:{seconds:02d}] Lvl {state['level']} | CS {state['minions_killed']} | Pos: ({pos_x}, {pos_y}) [{detected}]")
+            print(f"  >> Model says go to: {location} ({target_x}, {target_y})")
 
             # Game logic based on state
             if garen.get('isDead', False):
@@ -282,10 +309,9 @@ def main():
                 move_to_position(target_x, target_y)
                 last_move_time = current_time
 
-            # Farm minions aggressively
+            # Farm minions - single action per tick with longer delay
             farm_minions()
-            time.sleep(0.1)
-            farm_minions()
+            time.sleep(0.3)  # Give time for action to register
 
             # Use E (spin) for wave clear - use it often
             if random.random() < 0.4:  # 40% chance each tick
