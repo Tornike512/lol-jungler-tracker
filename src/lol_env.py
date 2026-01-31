@@ -539,6 +539,54 @@ class LoLEnvironment(gym.Env):
 
         return reward
 
+    def _reward_no_shop(self) -> float:
+        """
+        Penalize clicking on shop area or being in base.
+        Shop icon is in bottom-right corner near minimap.
+        """
+        reward = 0.0
+
+        # Check if last action was a click in the shop area
+        if self.last_action is not None:
+            discrete_mouse = self.last_action.get("discrete_mouse", 0)
+
+            # If clicked (left or right click)
+            if discrete_mouse in [1, 2]:
+                # Shop icon is in bottom-right area of screen
+                # For 1920x1080: roughly x > 1750, y > 900
+                shop_x_threshold = capture_cfg.SCREEN_WIDTH * 0.91  # Right 9% of screen
+                shop_y_threshold = capture_cfg.SCREEN_HEIGHT * 0.83  # Bottom 17% of screen
+
+                if self.mouse_x > shop_x_threshold and self.mouse_y > shop_y_threshold:
+                    reward += reward_cfg.PENALTY_SHOP_CLICK
+
+                # Also penalize clicking on bottom HUD area (items, abilities area excluded)
+                # Items are in bottom-center, but shop button is bottom-right
+                gold_area_x_min = capture_cfg.SCREEN_WIDTH * 0.85
+                gold_area_y_min = capture_cfg.SCREEN_HEIGHT * 0.90
+
+                if self.mouse_x > gold_area_x_min and self.mouse_y > gold_area_y_min:
+                    reward += reward_cfg.PENALTY_SHOP_CLICK * 0.5  # Half penalty for gold area
+
+        # Also penalize being in base (detected from minimap position)
+        # Base is bottom-left corner for blue team
+        frame_data = self.capture.get_latest_frame()
+        if frame_data is not None and "minimap" in frame_data.regions:
+            minimap = frame_data.regions["minimap"]
+            player_pos = self._find_player_on_minimap(minimap)
+
+            if player_pos is not None:
+                px, py = player_pos
+                minimap_h, minimap_w = minimap.shape[:2]
+                px_norm = px / minimap_w
+                py_norm = py / minimap_h
+
+                # Base/fountain is in bottom-left corner (x < 0.15, y > 0.85)
+                if px_norm < 0.15 and py_norm > 0.85:
+                    reward += reward_cfg.PENALTY_IN_BASE
+
+        return reward
+
     def _find_player_on_minimap(self, minimap: np.ndarray) -> Optional[tuple]:
         """
         Find player position on minimap.
