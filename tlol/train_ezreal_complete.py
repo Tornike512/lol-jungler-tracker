@@ -194,6 +194,38 @@ def train_movement_model(dataset, epochs=30, batch_size=512, device='cpu'):
     print("TRAINING MOVEMENT MODEL")
     print("=" * 60)
 
+    # Analyze class distribution
+    print("\nAnalyzing movement class distribution...")
+    unique, counts = np.unique(dataset.movement, return_counts=True)
+    total = len(dataset.movement)
+
+    print(f"  Total classes with data: {len(unique)} / 81")
+    print(f"  Top 5 most common classes:")
+    sorted_indices = np.argsort(counts)[::-1]
+    for i in range(min(5, len(sorted_indices))):
+        idx = sorted_indices[i]
+        class_id = unique[idx]
+        count = counts[idx]
+        pct = count / total * 100
+        x_delta = (class_id // 9) - 4
+        z_delta = (class_id % 9) - 4
+        print(f"    Class {class_id} (dx={x_delta:+d}, dz={z_delta:+d}): {count:,} frames ({pct:.1f}%)")
+
+    # Compute class weights (inverse frequency)
+    class_weights = np.zeros(81, dtype=np.float32)
+    for cls, count in zip(unique, counts):
+        # Use inverse frequency with smoothing
+        class_weights[cls] = total / (count * len(unique))
+
+    # Normalize weights so max weight isn't too extreme
+    max_weight = 10.0  # Cap maximum weight
+    class_weights = np.clip(class_weights, 0.1, max_weight)
+    class_weights = class_weights / class_weights.sum() * 81  # Normalize to sum to num_classes
+
+    print(f"\n  Class weight range: [{class_weights.min():.2f}, {class_weights.max():.2f}]")
+
+    class_weights_tensor = torch.FloatTensor(class_weights).to(device)
+
     # Split dataset
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
@@ -212,7 +244,7 @@ def train_movement_model(dataset, epochs=30, batch_size=512, device='cpu'):
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', patience=3)
