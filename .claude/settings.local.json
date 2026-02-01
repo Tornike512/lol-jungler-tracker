@@ -20,7 +20,10 @@
       "Bash(dir:*)",
       "Bash(powershell -Command:*)",
       "Bash(./ROFL.exe:*)",
-      "WebFetch(domain:www.leagueofgraphs.com)"
+      "WebFetch(domain:www.leagueofgraphs.com)",
+      "WebFetch(domain:miscellaneousstuff.github.io)",
+      "Bash(git clone:*)",
+      "Bash(powershell -command \"Expand-Archive -Path ezreal_converted.zip -DestinationPath ezreal -Force\")"
     ]
   }
 }
