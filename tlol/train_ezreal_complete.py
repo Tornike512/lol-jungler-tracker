@@ -78,6 +78,10 @@ class EzrealCompleteDataset(Dataset):
                 # Based on analysis: columns -20 to -1 contain action data
                 abilities = data[:, -20:].astype(np.float32)
 
+                # Normalize abilities to 0-1 range for BCE loss
+                # Some columns have values > 1 (like ability levels 0, 3, 4)
+                abilities = np.clip(abilities, 0, 1)
+
                 all_obs.append(obs)
                 all_movement.append(movement)
                 all_abilities.append(abilities)
@@ -402,5 +406,90 @@ def main():
     print("  - ezreal_ability_model.pt")
 
 
+def test_dataset():
+    """Test dataset loading without training."""
+    print("=" * 60)
+    print("TESTING DATASET LOADING")
+    print("=" * 60)
+
+    data_dir = "data/ezreal_data/NP"
+
+    # Test with limited games
+    print("\n[Test 1] Loading 5 games with all features...")
+    try:
+        dataset = EzrealCompleteDataset(
+            data_dir, max_games=5, use_all_features=True)
+        print(f"[OK] Dataset loaded successfully")
+        print(f"  - Total frames: {len(dataset):,}")
+        print(f"  - Observation shape: {dataset.observations.shape}")
+        print(f"  - Movement classes: {len(np.unique(dataset.movement))}")
+        print(f"  - Ability features: {dataset.abilities.shape[1]}")
+
+        # Test getting a sample
+        sample = dataset[0]
+        print(f"\n[OK] Sample retrieval works")
+        print(f"  - obs shape: {sample['obs'].shape}")
+        print(f"  - movement: {sample['movement']}")
+        print(f"  - abilities shape: {sample['abilities'].shape}")
+        print(
+            f"  - abilities range: [{sample['abilities'].min():.2f}, {sample['abilities'].max():.2f}]")
+
+    except Exception as e:
+        print(f"[FAIL] Error: {e}")
+        return False
+
+    # Test DataLoader
+    print("\n[Test 2] Testing DataLoader...")
+    try:
+        from torch.utils.data import DataLoader
+        loader = DataLoader(dataset, batch_size=32, shuffle=True)
+        batch = next(iter(loader))
+        print(f"[OK] DataLoader works")
+        print(f"  - Batch obs shape: {batch['obs'].shape}")
+        print(f"  - Batch movement shape: {batch['movement'].shape}")
+        print(f"  - Batch abilities shape: {batch['abilities'].shape}")
+    except Exception as e:
+        print(f"[FAIL] Error: {e}")
+        return False
+
+    # Test model creation
+    print("\n[Test 3] Testing model creation...")
+    try:
+        input_dim = dataset.observations.shape[1]
+
+        movement_model = MovementModel(input_dim)
+        ability_model = AbilityModel(input_dim, dataset.abilities.shape[1])
+
+        print(f"[OK] Models created")
+        print(
+            f"  - Movement model params: {sum(p.numel() for p in movement_model.parameters()):,}")
+        print(
+            f"  - Ability model params: {sum(p.numel() for p in ability_model.parameters()):,}")
+
+        # Test forward pass
+        with torch.no_grad():
+            obs = sample['obs'].unsqueeze(0)
+            move_out = movement_model(obs)
+            ability_out = ability_model(obs)
+            print(f"[OK] Forward pass works")
+            print(f"  - Movement output: {move_out.shape}")
+            print(f"  - Ability output: {ability_out.shape}")
+    except Exception as e:
+        print(f"[FAIL] Error: {e}")
+        return False
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS PASSED")
+    print("=" * 60)
+    return True
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        # Run tests only
+        test_dataset()
+    else:
+        # Run full training
+        main()
