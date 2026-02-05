@@ -18,6 +18,7 @@ ENV/
 logs/
 assets/champions/
 calibration.json
+rofls/
 
 # Test files
 test_voice.py
