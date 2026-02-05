@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import requests; r = requests.get\\(''https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/test/EUW'', headers={''X-Riot-Token'': ''RGAPI-653c2cd5-dd90-424d-bf15-1ebf6d44fe54''}\\); print\\(r.status_code, r.text[:200]\\)\")",
+      "Bash(python -c:*)",
+      "Bash(del:*)",
+      "Bash(python:*)",
+      "WebSearch",
+      "WebFetch(domain:www.leagueofgraphs.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:maknee.github.io)",
+      "Bash(RIOT_API_KEY=\"RGAPI-653c2cd5-dd90-424d-bf15-1ebf6d44fe54\" python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}
