@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"import requests; r = requests.get\\(''https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/test/EUW'', headers={''X-Riot-Token'': ''RGAPI-653c2cd5-dd90-424d-bf15-1ebf6d44fe54''}\\); print\\(r.status_code, r.text[:200]\\)\")",
+      "Bash(python -c \"import requests; r = requests.get\\(''https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/test/EUW'', headers={''X-Riot-Token'': ''RGAPI-2c2d9938-3d02-464e-b62e-70b4e57c4565''}\\); print\\(r.status_code, r.text[:200]\\)\")",
       "Bash(python -c:*)",
       "Bash(del:*)",
       "Bash(python:*)",
@@ -9,10 +9,20 @@
       "WebFetch(domain:www.leagueofgraphs.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:maknee.github.io)",
-      "Bash(RIOT_API_KEY=\"RGAPI-653c2cd5-dd90-424d-bf15-1ebf6d44fe54\" python:*)",
+      "Bash(RIOT_API_KEY=\"RGAPI-2c2d9938-3d02-464e-b62e-70b4e57c4565\" python:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(RIOT_API_KEY=\"RGAPI-2c2d9938-3d02-464e-b62e-70b4e57c4565\" python rofl_scraper.py)",
+      "Bash(setx:*)",
+      "WebFetch(domain:riot-api-libraries.readthedocs.io)",
+      "WebFetch(domain:miscellaneousstuff.github.io)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:developer.riotgames.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(git -C c:UsersUserDesktoplol-jungler-tracker rm --cached katarina_games.jsonl)",
+      "Bash(git rm:*)"
     ]
   }
 }

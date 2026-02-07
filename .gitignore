@@ -19,6 +19,9 @@ logs/
 assets/champions/
 calibration.json
 rofls/
+*.jsonl
+*.jsonl.gz
+extraction_progress.json
 
 # Test files
 test_voice.py
