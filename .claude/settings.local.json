@@ -22,7 +22,9 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:pypi.org)",
       "Bash(git -C c:UsersUserDesktoplol-jungler-tracker rm --cached katarina_games.jsonl)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(git reset:*)",
+      "Bash(powershell -Command:*)"
     ]
   }
 }

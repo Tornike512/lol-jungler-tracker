@@ -15,8 +15,9 @@ from huggingface_hub import hf_hub_download, list_repo_tree
 
 REPO_ID = "maknee/league-of-legends-decoded-replay-packets"
 TARGET_CHAMPION = "katarina"
-OUTPUT_FILE = "katarina_training_data.jsonl.gz"
-PROGRESS_FILE = "extraction_progress.json"
+OUTPUT_DIR = "D:\\katarina_dataset"
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "katarina_training_data.jsonl.gz")
+PROGRESS_FILE = os.path.join(OUTPUT_DIR, "extraction_progress.json")
 
 
 def get_all_batch_files():
@@ -219,10 +220,17 @@ def process_batch(batch_file):
                 result["batch"] = batch_file
                 katarina_games.append(result)
 
+    # Delete cached batch file to free disk space on C:
+    try:
+        os.remove(local_path)
+    except OSError:
+        pass
+
     return katarina_games
 
 
 def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     batch_files = get_all_batch_files()
     progress = load_progress()
     completed = set(progress["completed_batches"])
